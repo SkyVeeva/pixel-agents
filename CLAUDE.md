@@ -14,6 +14,7 @@ core/                                Protocol + interface definitions (zero runt
     schemas.ts                       AgentMeta, SpriteData, FurnitureCatalogEntry
     provider.ts                      HookProvider, AgentEvent (the integration boundary)
     teamProvider.ts                  Optional TeamProvider (semantic queries for Lead + Teammates)
+    sessionIndexProvider.ts          Optional SessionIndexProvider (title/surface + archive lifecycle)
     transport.ts                     MessageTransport interface, TransportState
     adapter.ts                       StateAdapter, AssetCache, PersistedAgent, AgentSeat
     terminalAdapter.ts               TerminalAdapter (editor-driven terminal management)
@@ -25,8 +26,11 @@ server/                              Lifecycle runtime + Fastify HTTP/WS server
     providers/hook/claude/           Reference HookProvider — only place that knows Claude specifics
       claude.ts                      normalizeHookEvent for 11 Claude events, formatToolStatus, file fallback
       claudeTeamProvider.ts          TeamProvider: reads ~/.claude/teams/<name>/config.json
+      claudeSurfacePaths.ts          Claude.app support-dir layout (Cowork + desktop), per-OS, defensive
+      claudeSessionIndex.ts          SessionIndexProvider: reads desktop + Cowork metadata sidecars
+      claudeAppFocus.ts              buildFocusUri → claude://resume?session=<id> (null for Cowork)
       claudeHookInstaller.ts         Atomic install/uninstall in ~/.claude/settings.json
-      constants.ts                   Claude hook event names, script path
+      constants.ts                   Claude hook event names, script path, Claude.app dir names + deep-link prefix
       hooks/claude-hook.ts           Hook script (CJS+shebang, bundled to dist/hooks/claude-hook.js)
     providers/index.ts               Provider registry
     agentRuntime.ts                  Lifecycle core: timers, scanners, HookEventHandler, SessionRouter, DismissalTracker
@@ -36,6 +40,7 @@ server/                              Lifecycle runtime + Fastify HTTP/WS server
     hookEventHandler.ts              Dispatches normalized AgentEvent into runtime
     httpServer.ts                    Fastify: POST /api/hooks/:providerId, GET /api/health, GET /ws, SPA (standalone)
     clientMessageHandler.ts          Single dispatch point for ClientMessage from webview
+    appFocus.ts                      Generic per-OS launcher (open/start/xdg-open), injectable spawn
     server.ts                        Top-level composition
     cli.ts                           npx pixel-agents entry (npm bin)
     fileStateAdapter.ts              Namespaced ~/.pixel-agents/ persistence
@@ -48,7 +53,7 @@ server/                              Lifecycle runtime + Fastify HTTP/WS server
     teamUtils.ts                     isInlineTeammateOf, getInlineTeammates, hasInlineTeammates
     types.ts                         ServerAgentState
     constants.ts                     All timing/scanning constants
-  __tests__/                         13 Vitest files
+  __tests__/                         Vitest files (server unit/integration)
   manual-hook-events.http            Manual hook testing helper (REST-Client format)
 
 adapters/vscode/                     VS Code surface — composes core + server
@@ -126,11 +131,12 @@ e2e/                                 Playwright suite (real VS Code + mock-claud
     internal-agent.ts                spawnInternalAgentAndWait
     lifecycle.ts                     Reusable scenario fragments
     team.ts                          Team config seeding + teammate helpers
+    cowork.ts                        Fabricate a Claude Cowork session tree (+ metadata sidecar) under tmpHome
     allure-labels.ts                 @area:<tag> → Allure epic
   tests/
     claude/hooks-on/                 basic.spec.ts, lifecycle.spec.ts, teams.spec.ts
     claude/hooks-off/                lifecycle.spec.ts, matrix.spec.ts
-    standalone/                      hooks.spec.ts
+    standalone/                      hooks.spec.ts, ui.spec.ts, multi-server-hooks.spec.ts, cowork.spec.ts
   README.md                          Auto-generated test inventory (regen via npm run e2e:inventory)
 
 scripts/
@@ -186,8 +192,8 @@ Adding a new CLI integration is one subdirectory under `server/src/providers/hoo
 
 `core/asyncapi.yaml` is the contract. Pinned to **3.0.0** because `@asyncapi/modelina@5.10.1` declares `supportedVersions: ['3.0.0']` only; bumping to 3.1.0 produces `export type Root = any`. Revisit when Modelina ships 3.1.0 support.
 
-- **26 ServerMessage variants** (server → client): agent lifecycle, agent activity, sub-agent activity, team + tokens, assets, settings + workspace, diagnostics.
-- **18 ClientMessage variants** (client → server): lifecycle (`webviewReady`, `launchAgent`, `focusAgent`, `closeAgent`), layout (`saveAgentSeats`, `saveLayout`, `exportLayout`, `importLayout`), settings (`setSoundEnabled`, `setHooksEnabled`, `setWatchAllSessions`, `setAlwaysShowLabels`, `setHooksInfoShown`, `setLastSeenVersion`), discovery + assets, diagnostics.
+- **29 ServerMessage variants** (server → client): agent lifecycle, agent activity, sub-agent activity, team + tokens, session metadata (`agentSessionInfo` — title/surface), assets, settings + workspace, diagnostics. `AgentCreated`/`ExistingAgents` also carry optional `sessionTitle`/`surface`.
+- **20 ClientMessage variants** (client → server): lifecycle (`webviewReady`, `launchAgent`, `focusAgent`, `closeAgent`), layout (`saveAgentSeats`, `saveLayout`, `exportLayout`, `importLayout`), settings (`setSoundEnabled`, `setHooksEnabled`, `setWatchAllSessions`, `setWatchCoworkSessions`, `setAlwaysShowLabels`, `setHooksInfoShown`, `setLastSeenVersion`), discovery + assets, diagnostics.
 
 Both unions use `oneOf` with `discriminator: type`. Every concrete message sets `additionalProperties: false`.
 
@@ -216,8 +222,9 @@ export type TransportState = 'connecting' | 'connected' | 'reconnecting' | 'disc
 `HookProvider` (`core/src/provider.ts`) is the integration boundary. Today only Claude Code is implemented. The interface:
 
 - **Required**: `normalizeHookEvent(raw)` → `{ sessionId, event: AgentEvent } | null`; `installHooks` / `uninstallHooks` / `areHooksInstalled`; `formatToolStatus`; `permissionExemptTools`, `subagentToolNames`, `readingTools` sets.
-- **Optional file fallback**: `getSessionDirs(workspace)`, `getAllSessionRoots()`, `sessionFilePattern`, `parseTranscriptLine(line)`, `buildLaunchCommand(sessionId, cwd, opts)`. Used when hooks aren't installed.
+- **Optional file fallback**: `getSessionDirs(workspace)`, `getAllSessionRoots()`, `getAuxiliarySessionRoots()`, `sessionFilePattern`, `parseTranscriptLine(line)`, `buildLaunchCommand(sessionId, cwd, opts)`, `buildFocusUri({sessionId, surface})`. Used when hooks aren't installed / for terminal-less focus. `getAuxiliarySessionRoots()` returns hook-less transcript roots gated by their own setting (Cowork's private `.claude/projects`).
 - **Optional team extension**: `team?: TeamProvider` for Lead + Teammates support.
+- **Optional session-metadata extension**: `sessionIndex?: SessionIndexProvider` (`core/src/sessionIndexProvider.ts`) for out-of-band title/surface + archive lifecycle (Claude.app sidecars). See "Claude ecosystem surfaces" below.
 
 `AgentEvent.kind` values: `toolStart`, `toolEnd`, `turnEnd`, `subagentStart`, `subagentEnd`, `subagentTurnEnd`, `progress`, `permissionRequest`, `sessionStart`, `sessionEnd`. The runtime dispatches on `kind`, never on CLI-specific tool names.
 
@@ -236,6 +243,20 @@ Three teammate modes:
 Teammate dismissal is driven by team config polling (`getTeamMembers(teamName)` is authoritative) and by `sessionEnd` on the lead.
 
 **Subtle gate (the one that bit us recently)**: in `webview-ui/src/hooks/useExtensionMessages.ts`, `agentToolStart` with `runInBackground=true` only creates a Subtask sub-character when the **parent has no `teamName`**. With a team, `onTeammateDetected` creates the teammate instead (and the gate prevents a ghost sub-agent). Without a team, the teammate path never fires and the basic Subtask sub-character is the only visible representation.
+
+### Claude ecosystem surfaces (Cowork + desktop app)
+
+Beyond CLI/VS Code terminals, the runtime surfaces **Claude Cowork** and **Claude Code desktop app** sessions. Both are undocumented Claude.app internals (verified 2026-07-17, app claude-code 2.1.209 — see `docs/superpowers/specs/2026-07-17-claude-ecosystem-design.md`), so everything parses defensively and degrades on absence.
+
+| Surface     | Transcripts                                                     | Hooks? | Discovery                                                    | Focus                                           |
+| ----------- | --------------------------------------------------------------- | ------ | ------------------------------------------------------------ | ----------------------------------------------- |
+| **Desktop** | global `~/.claude/projects` (normal Claude Code sessions)       | yes    | normal hook / scan path; enriched via `sessionIndex`         | `claude://resume?session=<cliSessionId>` ✅     |
+| **Cowork**  | private per-session `<dir>/.claude/projects` (schema-identical) | **no** | `getAuxiliarySessionRoots()`, gated by `watchCoworkSessions` | resume **fails** → front app (`open -a Claude`) |
+
+- **Paths** (`providers/hook/claude/claudeSurfacePaths.ts`): per-OS Claude.app support dir; walks account/user levels **without assuming UUID dir names** (a literal `skills-plugin` account exists). All homedir/env-derived so tests fabricate the tree under tmpHome.
+- **Metadata** (`claudeSessionIndex.ts` → `SessionIndexProvider`): reads both sidecar families keyed by `cliSessionId`. `AgentRuntime.startSessionIndexPolling()` (every `SESSION_INDEX_POLL_INTERVAL_MS` = 5 s, both hook + heuristic modes) joins by `sessionId === cliSessionId` (Cowork transcript-path-prefix fallback), broadcasts `agentSessionInfo` on change, removes on `isArchived` (any surface) or metadata disappearance (Cowork only). `setSessionInfoResolver` enriches title/surface at adoption + skips archived sessions in the scanner.
+- **Gating**: `watchCoworkSessions` (default OFF) is independent of `watchAllSessions`; turning it off calls `removeAgentsBySurface('cowork')`. The Watch-All-OFF cleanup skips `surface === 'cowork'` so it can't nuke Cowork agents.
+- **Focus** (`claudeAppFocus.buildFocusUri` + generic `server/src/appFocus.ts`): deep link for desktop/plain sessions; Cowork returns null → `activateApp('Claude')`.
 
 ## Server Runtime
 
@@ -302,7 +323,7 @@ Per-agent runtime data: provider reference, session key, transcript-fallback fie
   hooks/claude-hook.js     Bundled hook script (CJS, shebang)
 ```
 
-`FileStateAdapter({ namespace })` backs both runtimes. Per-namespace settings: `soundEnabled`, `lastSeenVersion`, `alwaysShowLabels`, `watchAllSessions`, `hooksEnabled`, `hooksInfoShown`. Running both surfaces in parallel never clobbers either.
+`FileStateAdapter({ namespace })` backs both runtimes. Per-namespace settings: `soundEnabled`, `lastSeenVersion`, `alwaysShowLabels`, `watchAllSessions`, `watchCoworkSessions`, `hooksEnabled`, `hooksInfoShown`. Running both surfaces in parallel never clobbers either.
 
 `migrateVsCodeState` (VS Code adapter only) walks each known legacy key once with **verify-before-clear** semantics: write to file, read back, only then clear the legacy key. While anything remains unmigrated, activation shows a non-blocking warning.
 
@@ -411,18 +432,25 @@ Three tiers, each with its own framework.
 
 ### Server unit/integration (Vitest)
 
-`server/__tests__/` — 13 files, ~200 tests:
+`server/__tests__/` — Vitest, ~300 tests. Highlights:
 
 | File                           | Coverage                                                            |
 | ------------------------------ | ------------------------------------------------------------------- |
-| `agentStateStore.test.ts`      | Mutations, EventEmitter events, snapshot                            |
+| `agentStateStore.test.ts`      | Mutations, EventEmitter events, snapshot, persist round-trip        |
 | `hookEventHandler.test.ts`     | Routing, buffering, normalized dispatch, team gating                |
 | `sessionRouter.test.ts`        | session_id mapping, pending sessions, buffer flush                  |
 | `fileWatcherDismissal.test.ts` | DismissalTracker integration                                        |
 | `fileStateAdapter.test.ts`     | Namespaced persistence, allowlist, settings round-trip              |
+| `configPersistence.test.ts`    | Area settings + `watchCoworkSessions` default/round-trip/coercion   |
 | `migrateVsCodeState.test.ts`   | Verify-before-clear, partial migration                              |
 | `teamUtils.test.ts`            | Inline-teammate helpers                                             |
 | `claudeTeamProvider.test.ts`   | Discovery, membership, metadata extraction                          |
+| `claudeSurfacePaths.test.ts`   | Claude.app path walk (non-UUID account), aux roots, isCoworkPath    |
+| `claudeSessionIndex.test.ts`   | Desktop + Cowork sidecar parsing, malformed/missing skip            |
+| `sessionIndexPoller.test.ts`   | Join/enrich/archive-removal/disappearance/prefix-fallback           |
+| `appFocus.test.ts`             | Per-OS command selection, dispatch, best-effort no-throw            |
+| `claudeAppFocus.test.ts`       | `buildFocusUri` desktop vs Cowork (null)                            |
+| `agentRuntime.test.ts`         | Foreign-session gate; `removeAgentsBySurface`; session-index poll   |
 | `claude.test.ts`               | `normalizeHookEvent` per Claude event, file fallback                |
 | `claudeHookInstaller.test.ts`  | Atomic install/uninstall                                            |
 | `claude-hook.test.ts`          | Spawned hook script integration (needs `dist/hooks/claude-hook.js`) |
@@ -439,16 +467,16 @@ Run: `npm run test:webview`.
 
 ### End-to-end (Playwright)
 
-`e2e/` — Playwright tests against a real VS Code Electron instance + a standalone Fastify server. **47 tests across 6 spec files**, run on CI as a 3-OS x 3-shard matrix (Linux, macOS, Windows; each shard runs ~1/3 of the suite at `--workers=1`).
+`e2e/` — Playwright tests against a real VS Code Electron instance + a standalone Fastify server. **76 tests** (see `e2e/README.md` for the authoritative inventory), run on CI as a 3-OS x 3-shard matrix (Linux, macOS, Windows; each shard runs ~1/3 of the suite at `--workers=1`).
 
-| Area (`@area:<tag>`) | Specs                                                                     | What                                                                                                                                                               |
-| -------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `spawn`              | `claude/hooks-on/basic.spec.ts`                                           | "+ Agent" creates JSONL session, character renders, external session adoption                                                                                      |
-| `lifecycle`          | `claude/hooks-on/lifecycle.spec.ts`, `claude/hooks-off/lifecycle.spec.ts` | /clear, --resume, reassignment, stale cleanup, subagent visibility, background routing                                                                             |
-| `cross-cutting`      | spread across both lifecycle files                                        | turn_duration cleanup, permission timer cancellation, sub-agent permission bubble, sound, label persistence, hook install/uninstall, layout editor save round-trip |
-| `teams`              | `claude/hooks-on/teams.spec.ts`                                           | Internal/external lead + tmux/inline teammate routing                                                                                                              |
-| `matrix`             | `claude/hooks-off/matrix.spec.ts`                                         | Heuristic-mode broad coverage                                                                                                                                      |
-| `standalone`         | `standalone/hooks.spec.ts`                                                | npx pixel-agents serves SPA, WebSocket protocol, hook-driven lifecycle in browser                                                                                  |
+| Area (`@area:<tag>`) | Specs                                                                               | What                                                                                                                                                               |
+| -------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `spawn`              | `claude/hooks-on/basic.spec.ts`                                                     | "+ Agent" creates JSONL session, character renders, external session adoption                                                                                      |
+| `lifecycle`          | `claude/hooks-on/lifecycle.spec.ts`, `claude/hooks-off/lifecycle.spec.ts`           | /clear, --resume, reassignment, stale cleanup, subagent visibility, background routing                                                                             |
+| `cross-cutting`      | spread across both lifecycle files                                                  | turn_duration cleanup, permission timer cancellation, sub-agent permission bubble, sound, label persistence, hook install/uninstall, layout editor save round-trip |
+| `teams`              | `claude/hooks-on/teams.spec.ts`                                                     | Internal/external lead + tmux/inline teammate routing                                                                                                              |
+| `matrix`             | `claude/hooks-off/matrix.spec.ts`                                                   | Heuristic-mode broad coverage                                                                                                                                      |
+| `standalone`         | `standalone/hooks.spec.ts`, `standalone/ui.spec.ts`, `standalone/cowork.spec.ts`, … | npx pixel-agents serves SPA, WebSocket protocol, hook-driven lifecycle in browser; Cowork discovery/title/archive lifecycle (fabricated tree under tmpHome)        |
 
 **Mock claude**: Tests never invoke real `claude`. A bash script (`e2e/fixtures/mock-claude`) is copied into an isolated `bin/` and prepended to `PATH`. The scenario runner (`mock-claude-runner.cjs`) honors `claudeScenario(...).at(ms).appendJsonl(record).emitHook(event).holdOpenFor(ms).build()` to drive timed JSONL writes and hook events.
 

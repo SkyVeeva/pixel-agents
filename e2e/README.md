@@ -28,7 +28,7 @@ Every spawn permutation (internal vs external origin × basic vs inline-teammate
 
 ### Standalone server (`@area:standalone`)
 
-The `npx pixel-agents` CLI path: hook-driven lifecycle propagates from the local server into the browser SPA via the single `/ws` WebSocket endpoint.
+The `npx pixel-agents` CLI path: hook-driven lifecycle propagates from the local server into the browser SPA via the single `/ws` WebSocket endpoint; UI parity checks; and **Claude Cowork** discovery — a fabricated Cowork session tree under the isolated tmpHome is adopted only when the `Watch Cowork Sessions` toggle is on (tagged `surface=cowork`, despawns on toggle-off), its metadata title renders as `Cowork · <title>`, and flipping the sidecar to `isArchived` despawns it via the session-index poller.
 
 ### Pet system (`@area:pets`)
 
@@ -38,14 +38,16 @@ The animated pets feature, which has no hook dependency. Pet sprites load and th
 
 Scenarios that exist as product behavior but are not in the automated suite. PRs that close a gap should remove the corresponding row.
 
-| Scenario                                                                                 | Why not automated                                                                                                                            | Tracked                      |
-| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| Multi-window `layout.json` cross-sync                                                    | Needs two VS Code instances simultaneously; fixture work                                                                                     | none                         |
-| External asset directory add/remove via Settings                                         | Needs bundled test asset packs                                                                                                               | none                         |
-| Bypass-permissions startup flag                                                          | Security-sensitive; manual review path                                                                                                       | none                         |
-| Workspace folder add/remove mid-session                                                  | Edge case; infra-heavy                                                                                                                       | none                         |
-| Heuristic-timer cancellation after **internal-terminal** agent close                     | VS Code terminal panel collapse races the canvas click on the X overlay; covered via the external-agent variant which dodges the layout race | external variant in suite    |
-| Producer/viewer relay scenarios (multi-viewer replay, producer reconnect reconciliation) | Producer endpoint not yet built                                                                                                              | `feat/producer-viewer-split` |
+| Scenario                                                                                 | Why not automated                                                                                                                                                                               | Tracked                      |
+| ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| Multi-window `layout.json` cross-sync                                                    | Needs two VS Code instances simultaneously; fixture work                                                                                                                                        | none                         |
+| External asset directory add/remove via Settings                                         | Needs bundled test asset packs                                                                                                                                                                  | none                         |
+| Bypass-permissions startup flag                                                          | Security-sensitive; manual review path                                                                                                                                                          | none                         |
+| Workspace folder add/remove mid-session                                                  | Edge case; infra-heavy                                                                                                                                                                          | none                         |
+| Heuristic-timer cancellation after **internal-terminal** agent close                     | VS Code terminal panel collapse races the canvas click on the X overlay; covered via the external-agent variant which dodges the layout race                                                    | external variant in suite    |
+| Producer/viewer relay scenarios (multi-viewer replay, producer reconnect reconciliation) | Producer endpoint not yet built                                                                                                                                                                 | `feat/producer-viewer-split` |
+| Focus click actually fronting a session in Claude.app (`claude://resume` / `open -a`)    | Launches a real desktop app — untestable in CI and undesirable locally; the URI/command logic is covered by `appFocus`/`claudeAppFocus` unit tests and the handler is best-effort (can't crash) | none                         |
+| Desktop-app session title enrichment end-to-end                                          | Shares the session-index poller path with Cowork (covered by the `surface=desktop` poller unit test); a VS Code hooks-on + sidecar e2e adds cost without new coverage                           | none                         |
 
 ## Pre-release manual smoke (~30 min)
 
@@ -63,6 +65,11 @@ CI green on this suite is the safety net for behavioral regressions. The checks 
 - Launch the Extension Development Host (F5), click + Agent, ask Claude to do a few tool-heavy turns and a permission-requiring tool. Watch for character desync, missing animations, stuck permission bubbles.
 - Use a session with a large pasted image (multi-MB base64 user message) — confirm the "Possible format issue" warning doesn't false-fire and tool tracking still works.
 - Test with one MCP server installed — confirm `mcp_progress` records don't break tool status.
+
+**Claude ecosystem surfaces — Cowork + desktop app** (real Claude.app internals are undocumented and untestable in CI):
+
+- With `Watch Cowork Sessions` on, run a real Cowork session in Claude.app → a character appears with its real title (`Cowork · <title>`) and animates with tool activity; archive the session → the character despawns within ~5 s.
+- Click a **desktop-app** session character → Claude.app fronts that session (`claude://resume`). Click a **Cowork** character → Claude.app comes to the foreground (no per-session deep link exists for Cowork). Neither click ever crashes the panel.
 
 **`npx pixel-agents` standalone** (e2e covers Chrome via Playwright; verify other browsers + real workflow):
 

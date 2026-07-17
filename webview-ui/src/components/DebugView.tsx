@@ -128,6 +128,11 @@ export function DebugView({
             ✕
           </Button>
         </span>
+        {(() => {
+          const ch = officeState.characters.get(id);
+          const meta = ch ? [ch.surface, ch.sessionTitle].filter(Boolean).join(' · ') : '';
+          return meta ? <div className="pl-10 text-xs opacity-70">{meta}</div> : null;
+        })()}
         {(tools.length > 0 || status === 'waiting') && (
           <div className="flex flex-col gap-[1px] mt-4 pl-4">
             {tools.map((tool) => (

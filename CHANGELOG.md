@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Claude ecosystem surfaces — Cowork + desktop app sessions** — Extends the office beyond CLI/VS Code terminals to visualize **Claude Cowork** and **Claude Code desktop app** sessions. Characters mirror each session's real title and origin surface (shown as `Cowork · <title>`), animate with tool activity, and clicking a terminal-less character fronts its session in Claude.app via a `claude://resume` deep link (Cowork falls back to activating the app, since it has no per-session link). Cowork discovery is file-watch-only (Cowork never fires hooks) and gated behind a new **Watch Cowork Sessions** setting (default off); a session-metadata poller keeps titles in sync and despawns archived sessions. Built on new optional provider extensions (`getAuxiliarySessionRoots`, `sessionIndex`, `buildFocusUri`) and new protocol fields (`sessionTitle`/`surface`, `agentSessionInfo`, `setWatchCoworkSessions`) — fully upstream-compatible (AsyncAPI contract + regen, strict layering, defensive parsing of undocumented Claude.app internals).
+
 ## v1.3.0
 
 ### Features
