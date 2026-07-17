@@ -138,5 +138,29 @@ describe('configPersistence: areas', () => {
       expect(reloaded.vscode.areaMappings).toEqual({ frontend: ['Engineering'] });
       expect(reloaded.standalone.areaMappings).toEqual({});
     });
+
+    it('defaults watchCoworkSessions to false and round-trips it per-namespace', () => {
+      const cfg = readConfig();
+      expect(cfg.vscode.watchCoworkSessions).toBe(false);
+      expect(cfg.standalone.watchCoworkSessions).toBe(false);
+
+      cfg.standalone.watchCoworkSessions = true;
+      writeConfig(cfg);
+
+      const reloaded = readConfig();
+      expect(reloaded.standalone.watchCoworkSessions).toBe(true);
+      expect(reloaded.vscode.watchCoworkSessions).toBe(false);
+    });
+
+    it('coerces a non-boolean watchCoworkSessions to the default false', () => {
+      const configDir = path.join(tempHome, '.pixel-agents');
+      fs.mkdirSync(configDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(configDir, 'config.json'),
+        JSON.stringify({ standalone: { watchCoworkSessions: 'sure' } }),
+        'utf-8',
+      );
+      expect(readConfig().standalone.watchCoworkSessions).toBe(false);
+    });
   });
 });

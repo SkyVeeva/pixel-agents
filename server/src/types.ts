@@ -34,6 +34,12 @@ export interface AgentState {
   hooksOnly?: boolean;
   /** Provider that created this agent (defaults to 'claude') */
   providerId?: string;
+
+  // -- Session metadata (from Claude.app sidecars; see SessionIndexProvider) --
+  /** Human-readable session title, when known (Cowork / desktop). Preferred label. */
+  sessionTitle?: string;
+  /** Origin surface: 'cowork', 'desktop', or undefined for plain CLI/terminal. */
+  surface?: string;
   /** Set when SessionEnd(reason=clear) fires; cleared when SessionStart(source=clear) reassigns */
   pendingClear?: boolean;
   /** Hook-generated tool ID for PreToolUse/PostToolUse correlation */
@@ -71,6 +77,10 @@ export interface PersistedAgent {
   projectDir: string;
   /** Workspace folder name (only set for multi-root workspaces) */
   folderName?: string;
+
+  // -- Session metadata --
+  sessionTitle?: string;
+  surface?: string;
 
   // -- Agent Teams --
   teamName?: string;

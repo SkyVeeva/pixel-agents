@@ -132,7 +132,26 @@ export function useExtensionMessages(
       hueShift?: number;
       seatId?: string;
       folderName?: string;
+      sessionTitle?: string;
+      surface?: string;
     }> = [];
+
+    // Session metadata (title/surface) that arrived before its character existed
+    // (e.g. an agentSessionInfo poll between existingAgents and layoutLoaded).
+    // Applied once the character is created. Mirrors the pendingAgents pattern.
+    const pendingSessionInfo = new Map<number, { title?: string; surface?: string }>();
+    const applySessionInfo = (id: number, title?: string, surface?: string) => {
+      const os = getOfficeState();
+      if (os.characters.has(id)) {
+        os.setSessionInfo(id, title, surface);
+      } else {
+        const prev = pendingSessionInfo.get(id) ?? {};
+        pendingSessionInfo.set(id, {
+          title: title ?? prev.title,
+          surface: surface ?? prev.surface,
+        });
+      }
+    };
 
     // Accumulate distinct folderNames seen across agents (never removed during the
     // session): the source for the Areas folder-mapping dropdown, so a folder stays
@@ -192,8 +211,18 @@ export function useExtensionMessages(
         // Add buffered agents now that layout (and seats) are correct
         for (const p of pendingAgents) {
           os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
+          if (p.sessionTitle !== undefined || p.surface !== undefined) {
+            os.setSessionInfo(p.id, p.sessionTitle, p.surface);
+          }
         }
         pendingAgents = [];
+        // Flush any session-info updates that raced ahead of character creation
+        for (const [id, info] of pendingSessionInfo) {
+          if (os.characters.has(id)) {
+            os.setSessionInfo(id, info.title, info.surface);
+            pendingSessionInfo.delete(id);
+          }
+        }
         layoutReadyRef.current = true;
         setLayoutReady(true);
         if (msg.wasReset) {
@@ -209,6 +238,8 @@ export function useExtensionMessages(
         const teammateName = msg.teammateName as string | undefined;
         const teammateParentId = msg.parentAgentId as number | undefined;
         const teamName = msg.teamName as string | undefined;
+        const sessionTitle = msg.sessionTitle as string | undefined;
+        const surface = msg.surface as string | undefined;
         setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]));
         // Don't auto-select teammates (keep focus on lead)
         if (!isTeammate) {
@@ -232,6 +263,15 @@ export function useExtensionMessages(
         } else {
           os.addAgent(id, undefined, undefined, undefined, undefined, folderName);
           noteFolderName(folderName);
+        }
+        if (sessionTitle !== undefined || surface !== undefined) {
+          os.setSessionInfo(id, sessionTitle, surface);
+        }
+        // Apply any session info that raced ahead of this character's creation.
+        const buffered = pendingSessionInfo.get(id);
+        if (buffered) {
+          os.setSessionInfo(id, buffered.title, buffered.surface);
+          pendingSessionInfo.delete(id);
         }
         saveAgentSeats(os);
       } else if (msg.type === 'agentClosed') {
@@ -267,6 +307,8 @@ export function useExtensionMessages(
           { palette?: number; hueShift?: number; seatId?: string }
         >;
         const folderNames = (msg.folderNames || {}) as Record<number, string>;
+        const sessionTitles = (msg.sessionTitles || {}) as Record<number, string>;
+        const surfaces = (msg.surfaces || {}) as Record<number, string>;
         // Buffer agents — they'll be added in layoutLoaded after seats are built
         for (const id of incoming) {
           const m = meta[id];
@@ -276,6 +318,8 @@ export function useExtensionMessages(
             hueShift: m?.hueShift,
             seatId: m?.seatId,
             folderName: folderNames[id],
+            sessionTitle: sessionTitles[id],
+            surface: surfaces[id],
           });
           noteFolderName(folderNames[id]);
         }
@@ -586,6 +630,12 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentTokenUsage') {
         const id = msg.id as number;
         os.setAgentTokens(id, msg.inputTokens as number, msg.outputTokens as number);
+      } else if (msg.type === 'agentSessionInfo') {
+        applySessionInfo(
+          msg.id as number,
+          msg.title as string | undefined,
+          msg.surface as string | undefined,
+        );
       }
     };
     const unsubscribe = transport.onMessage(handler);

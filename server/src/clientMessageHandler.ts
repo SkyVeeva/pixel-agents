@@ -44,6 +44,7 @@ const KEY_SOUND_ENABLED = 'pixel-agents.soundEnabled';
 const KEY_LAST_SEEN_VERSION = 'pixel-agents.lastSeenVersion';
 const KEY_ALWAYS_SHOW_LABELS = 'pixel-agents.alwaysShowLabels';
 const KEY_WATCH_ALL_SESSIONS = 'pixel-agents.watchAllSessions';
+const KEY_WATCH_COWORK_SESSIONS = 'pixel-agents.watchCoworkSessions';
 const KEY_HOOKS_ENABLED = 'pixel-agents.hooksEnabled';
 const KEY_HOOKS_INFO_SHOWN = 'pixel-agents.hooksInfoShown';
 const KEY_SHOW_AREAS = 'pixel-agents.showAreas';
@@ -228,6 +229,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   // 4. Settings (from adapter, with sensible defaults when adapter is absent)
   const cfg = readConfig();
   const watchAllSessions = adapter?.getSetting(KEY_WATCH_ALL_SESSIONS, false) ?? false;
+  const watchCoworkSessions = adapter?.getSetting(KEY_WATCH_COWORK_SESSIONS, false) ?? false;
   const hooksEnabled = adapter?.getSetting(KEY_HOOKS_ENABLED, true) ?? true;
   const showAreas = adapter?.getSetting(KEY_SHOW_AREAS, false) ?? false;
   send({
@@ -236,6 +238,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     lastSeenVersion: adapter?.getSetting(KEY_LAST_SEEN_VERSION, '') ?? '',
     extensionVersion: process.env.PIXEL_AGENTS_VERSION ?? '',
     watchAllSessions,
+    watchCoworkSessions,
     alwaysShowLabels: adapter?.getSetting(KEY_ALWAYS_SHOW_LABELS, false) ?? false,
     hooksEnabled,
     hooksInfoShown: adapter?.getSetting(KEY_HOOKS_INFO_SHOWN, false) ?? false,
@@ -264,6 +267,8 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   const agentIds: number[] = [];
   const folderNames: Record<number, string> = {};
   const externalAgents: Record<number, boolean> = {};
+  const sessionTitles: Record<number, string> = {};
+  const surfaces: Record<number, string> = {};
   for (const [id, agent] of store) {
     agentIds.push(id);
     if (agent.folderName) {
@@ -271,6 +276,12 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     }
     if (agent.isExternal) {
       externalAgents[id] = true;
+    }
+    if (agent.sessionTitle) {
+      sessionTitles[id] = agent.sessionTitle;
+    }
+    if (agent.surface) {
+      surfaces[id] = agent.surface;
     }
   }
   const seats = adapter?.loadSeats() ?? {};
@@ -280,5 +291,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     agentMeta: seats,
     folderNames,
     externalAgents,
+    sessionTitles,
+    surfaces,
   });
 }

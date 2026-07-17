@@ -14,6 +14,8 @@ export interface PersistedAgent {
   jsonlFile: string;
   projectDir: string;
   folderName?: string;
+  sessionTitle?: string;
+  surface?: string;
   teamName?: string;
   agentName?: string;
   isTeamLead?: boolean;

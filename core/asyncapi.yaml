@@ -99,6 +99,8 @@ components:
         # Agent Teams
         - $ref: '#/components/schemas/AgentTeamInfo'
         - $ref: '#/components/schemas/AgentTokenUsage'
+        # Session metadata (surface + title from Claude.app sidecars)
+        - $ref: '#/components/schemas/AgentSessionInfo'
         # Layout
         - $ref: '#/components/schemas/LayoutLoaded'
         # Assets
@@ -131,6 +133,7 @@ components:
         - $ref: '#/components/schemas/SetHooksEnabled'
         - $ref: '#/components/schemas/SetHooksInfoShown'
         - $ref: '#/components/schemas/SetWatchAllSessions'
+        - $ref: '#/components/schemas/SetWatchCoworkSessions'
         - $ref: '#/components/schemas/ExportLayout'
         - $ref: '#/components/schemas/ImportLayout'
         - $ref: '#/components/schemas/OpenSessionsFolder'
@@ -194,6 +197,18 @@ components:
         hooksOnly:
           type: boolean
           description: True when the agent is tracked purely via hooks (no JSONL fallback).
+        sessionTitle:
+          type: string
+          description: >-
+            Human-readable session title from the Claude.app sidecar metadata,
+            when known (Cowork / desktop sessions). Preferred over folderName
+            for the character's secondary label.
+        surface:
+          type: string
+          description: >-
+            Origin surface of the session: "cowork", "desktop", or absent for a
+            plain Claude Code CLI / VS Code terminal session. Kept as a free
+            string (no enum) so new surfaces need no protocol change.
 
     AgentClosed:
       description: An agent has been removed from the office.
@@ -246,6 +261,16 @@ components:
           description: Map of agent ID (string) to external flag.
           additionalProperties:
             type: boolean
+        sessionTitles:
+          type: object
+          description: Map of agent ID (string) to session title, when known.
+          additionalProperties:
+            type: string
+        surfaces:
+          type: object
+          description: Map of agent ID (string) to origin surface, when known.
+          additionalProperties:
+            type: string
 
     AgentStatus:
       description: Active vs waiting state for an agent (drives character animation).
@@ -432,6 +457,23 @@ components:
           type: integer
         outputTokens:
           type: integer
+
+    AgentSessionInfo:
+      description: >-
+        Session metadata update (title and/or surface) for an already-created
+        agent, from the Claude.app sidecar index poller. Modeled on AgentTeamInfo.
+      type: object
+      additionalProperties: false
+      required: [type, id]
+      properties:
+        type:
+          const: agentSessionInfo
+        id:
+          type: integer
+        title:
+          type: string
+        surface:
+          type: string
 
     LayoutLoaded:
       description: |
@@ -629,6 +671,7 @@ components:
         - lastSeenVersion
         - extensionVersion
         - watchAllSessions
+        - watchCoworkSessions
         - alwaysShowLabels
         - hooksEnabled
         - hooksInfoShown
@@ -644,6 +687,8 @@ components:
         extensionVersion:
           type: string
         watchAllSessions:
+          type: boolean
+        watchCoworkSessions:
           type: boolean
         alwaysShowLabels:
           type: boolean
@@ -844,6 +889,17 @@ components:
       properties:
         type:
           const: setWatchAllSessions
+        enabled:
+          type: boolean
+
+    SetWatchCoworkSessions:
+      description: Toggle discovery of Claude Cowork sessions.
+      type: object
+      additionalProperties: false
+      required: [type, enabled]
+      properties:
+        type:
+          const: setWatchCoworkSessions
         enabled:
           type: boolean
 

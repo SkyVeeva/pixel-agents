@@ -368,6 +368,8 @@ export class AgentRuntime {
         linesProcessed: 0,
         seenUnknownRecordTypes: new Set(),
         folderName: p.folderName,
+        sessionTitle: p.sessionTitle,
+        surface: p.surface,
         hookDelivered: false,
         inputTokens: 0,
         outputTokens: 0,

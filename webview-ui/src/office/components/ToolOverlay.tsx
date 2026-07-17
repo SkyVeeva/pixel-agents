@@ -29,6 +29,27 @@ import { CharacterState, TILE_SIZE } from '../types.js';
 // surfaces this label. Driven by Character.waitingAwaitingInput.
 const WAITING_INPUT_ACTIVITY_TEXT = 'Waiting for input';
 
+// Human-readable prefix for a session's origin surface, shown on the secondary
+// label line (e.g. "Cowork · <title>"). Absent surface = plain CLI/terminal
+// session, which gets no prefix.
+const SURFACE_LABELS: Record<string, string> = {
+  cowork: 'Cowork',
+  desktop: 'Desktop',
+};
+
+/** Build the character's secondary label: session title (preferred) or folder
+ *  name, with an optional surface prefix. Returns null when neither is known. */
+function getSecondaryLabel(
+  sessionTitle?: string,
+  folderName?: string,
+  surface?: string,
+): string | null {
+  const base = sessionTitle ?? folderName;
+  if (!base) return null;
+  const prefix = surface ? SURFACE_LABELS[surface] : undefined;
+  return prefix ? `${prefix} · ${base}` : base;
+}
+
 interface ToolOverlayProps {
   officeState: OfficeState;
   agents: number[];
@@ -202,7 +223,8 @@ export function ToolOverlay({
         const teamRoleLabel = ch.isTeamLead ? 'LEAD' : ch.agentName || null;
         const totalTokens = ch.inputTokens + ch.outputTokens;
         const tokenRatio = totalTokens / MAX_CONTEXT_TOKENS;
-        const hasExtraLines = !!(ch.folderName || teamRoleLabel);
+        const secondaryLabel = getSecondaryLabel(ch.sessionTitle, ch.folderName, ch.surface);
+        const hasExtraLines = !!(secondaryLabel || teamRoleLabel);
 
         return (
           <div
@@ -217,6 +239,7 @@ export function ToolOverlay({
             }}
             data-testid="agent-overlay"
             data-agent-id={id}
+            data-surface={ch.surface}
           >
             <div className="flex items-center border-border px-8 pt-2 pb-4 gap-5 pixel-panel whitespace-nowrap max-w-2xs">
               {dotColor && (
@@ -247,9 +270,12 @@ export function ToolOverlay({
                 >
                   {activityText}
                 </span>
-                {ch.folderName && (
-                  <span className="text-2xs leading-none overflow-hidden text-ellipsis block">
-                    {ch.folderName}
+                {secondaryLabel && (
+                  <span
+                    className="text-2xs leading-none overflow-hidden text-ellipsis block"
+                    data-testid="agent-secondary-label"
+                  >
+                    {secondaryLabel}
                   </span>
                 )}
               </div>

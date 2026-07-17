@@ -224,6 +224,12 @@ export interface Character {
   /** Workspace folder name (only set for multi-root workspaces) */
   folderName?: string;
 
+  // -- Session metadata (Claude.app sidecars) --
+  /** Human-readable session title, when known. Preferred over folderName for the label. */
+  sessionTitle?: string;
+  /** Origin surface: 'cowork', 'desktop', or undefined for plain CLI/terminal. */
+  surface?: string;
+
   // -- Agent Teams --
   /** Team name this agent belongs to */
   teamName?: string;

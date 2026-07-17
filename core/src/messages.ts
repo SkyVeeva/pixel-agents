@@ -25,6 +25,7 @@ export type ServerMessage =
   | SubagentToolPermission
   | AgentTeamInfo
   | AgentTokenUsage
+  | AgentSessionInfo
   | LayoutLoaded
   | FurnitureAssetsLoaded
   | CharacterSpritesLoaded
@@ -51,6 +52,7 @@ export type ClientMessage =
   | SetHooksEnabled
   | SetHooksInfoShown
   | SetWatchAllSessions
+  | SetWatchCoworkSessions
   | ExportLayout
   | ImportLayout
   | OpenSessionsFolder
@@ -76,6 +78,8 @@ export interface AgentCreated {
   parentAgentId?: number;
   teamName?: string;
   hooksOnly?: boolean;
+  sessionTitle?: string;
+  surface?: string;
 }
 
 export interface AgentClosed {
@@ -94,6 +98,8 @@ export interface ExistingAgents {
   agentMeta: Record<string, AgentSeatMeta>;
   folderNames: Record<string, string>;
   externalAgents: Record<string, boolean>;
+  sessionTitles?: Record<string, string>;
+  surfaces?: Record<string, string>;
 }
 
 export interface AgentSeatMeta {
@@ -186,6 +192,13 @@ export interface AgentTokenUsage {
   outputTokens: number;
 }
 
+export interface AgentSessionInfo {
+  type: 'agentSessionInfo';
+  id: number;
+  title?: string;
+  surface?: string;
+}
+
 export interface LayoutLoaded {
   type: 'layoutLoaded';
   layout: Record<string, any> | null;
@@ -267,6 +280,7 @@ export interface SettingsLoaded {
   lastSeenVersion: string;
   extensionVersion: string;
   watchAllSessions: boolean;
+  watchCoworkSessions: boolean;
   alwaysShowLabels: boolean;
   hooksEnabled: boolean;
   hooksInfoShown: boolean;
@@ -361,6 +375,11 @@ export interface SetHooksInfoShown {
 
 export interface SetWatchAllSessions {
   type: 'setWatchAllSessions';
+  enabled: boolean;
+}
+
+export interface SetWatchCoworkSessions {
+  type: 'setWatchCoworkSessions';
   enabled: boolean;
 }
 

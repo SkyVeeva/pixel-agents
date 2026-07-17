@@ -9,6 +9,7 @@ export interface AdapterSettings {
   lastSeenVersion: string;
   alwaysShowLabels: boolean;
   watchAllSessions: boolean;
+  watchCoworkSessions: boolean;
   hooksEnabled: boolean;
   hooksInfoShown: boolean;
   showAreas: boolean;
@@ -21,6 +22,7 @@ export const ADAPTER_SETTING_KEYS = [
   'lastSeenVersion',
   'alwaysShowLabels',
   'watchAllSessions',
+  'watchCoworkSessions',
   'hooksEnabled',
   'hooksInfoShown',
   'showAreas',
@@ -43,6 +45,7 @@ const DEFAULT_ADAPTER_SETTINGS: AdapterSettings = {
   lastSeenVersion: '',
   alwaysShowLabels: false,
   watchAllSessions: false,
+  watchCoworkSessions: false,
   hooksEnabled: true,
   hooksInfoShown: false,
   showAreas: false,
@@ -97,6 +100,10 @@ function parseAdapterSettings(raw: unknown): AdapterSettings {
       typeof obj.watchAllSessions === 'boolean'
         ? obj.watchAllSessions
         : DEFAULT_ADAPTER_SETTINGS.watchAllSessions,
+    watchCoworkSessions:
+      typeof obj.watchCoworkSessions === 'boolean'
+        ? obj.watchCoworkSessions
+        : DEFAULT_ADAPTER_SETTINGS.watchCoworkSessions,
     hooksEnabled:
       typeof obj.hooksEnabled === 'boolean'
         ? obj.hooksEnabled

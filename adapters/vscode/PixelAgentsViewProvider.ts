@@ -53,6 +53,7 @@ import {
   GLOBAL_KEY_SHOW_AREAS,
   GLOBAL_KEY_SOUND_ENABLED,
   GLOBAL_KEY_WATCH_ALL_SESSIONS,
+  GLOBAL_KEY_WATCH_COWORK_SESSIONS,
   LAYOUT_REVISION_KEY,
 } from './constants.js';
 import { VscodeTerminalAdapter } from './vscodeTerminalAdapter.js';
@@ -114,6 +115,8 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         parentAgentId: agent.leadAgentId,
         teamName: agent.teamName,
         hooksOnly: agent.hooksOnly || undefined,
+        sessionTitle: agent.sessionTitle,
+        surface: agent.surface,
       });
     });
     this.store.on('agentRemoved', (id) => {
@@ -382,6 +385,10 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           GLOBAL_KEY_WATCH_ALL_SESSIONS,
           false,
         );
+        const watchCoworkSessions = this.adapter.getSetting<boolean>(
+          GLOBAL_KEY_WATCH_COWORK_SESSIONS,
+          false,
+        );
         const alwaysShowLabels = this.adapter.getSetting<boolean>(
           GLOBAL_KEY_ALWAYS_SHOW_LABELS,
           false,
@@ -397,6 +404,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           lastSeenVersion,
           extensionVersion,
           watchAllSessions,
+          watchCoworkSessions,
           alwaysShowLabels,
           hooksEnabled,
           hooksInfoShown,

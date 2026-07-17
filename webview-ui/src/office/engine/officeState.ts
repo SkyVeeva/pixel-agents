@@ -973,6 +973,20 @@ export class OfficeState {
     ch.outputTokens = outputTokens;
   }
 
+  /** Update session metadata (title / surface) for an existing character.
+   *  Only overwrites a field when a defined value is provided, so a partial
+   *  update never clears a previously-known title or surface. */
+  setSessionInfo(id: number, title?: string, surface?: string): void {
+    const ch = this.characters.get(id);
+    if (!ch) return;
+    if (title !== undefined) {
+      ch.sessionTitle = title;
+    }
+    if (surface !== undefined) {
+      ch.surface = surface;
+    }
+  }
+
   update(dt: number): void {
     // Furniture animation cycling
     const prevFrame = Math.floor(this.furnitureAnimTimer / FURNITURE_ANIM_INTERVAL_SEC);
