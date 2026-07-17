@@ -14,6 +14,7 @@ const MIN_PANEL_HEIGHT_PX = 320;
 
 export interface WebviewSettings {
   watchAllSessions?: boolean;
+  watchCoworkSessions?: boolean;
   hooksEnabled?: boolean;
   alwaysShowLabels?: boolean;
   debugView?: boolean;
@@ -472,6 +473,9 @@ export async function setSettings(frame: WebviewSurface, settings: WebviewSettin
 
   if (settings.watchAllSessions !== undefined) {
     await setCheckbox(settingsModal, 'Watch All Sessions', settings.watchAllSessions);
+  }
+  if (settings.watchCoworkSessions !== undefined) {
+    await setCheckbox(settingsModal, 'Watch Cowork Sessions', settings.watchCoworkSessions);
   }
   if (settings.hooksEnabled !== undefined) {
     await setCheckbox(settingsModal, 'Instant Detection (Hooks)', settings.hooksEnabled);

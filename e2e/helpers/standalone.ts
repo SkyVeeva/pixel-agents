@@ -111,6 +111,12 @@ function spawnStandaloneHost(args: {
         ...process.env,
         HOME: args.homeDir,
         USERPROFILE: args.homeDir,
+        // Pin the OS-specific "application support" roots inside the isolated
+        // HOME so Claude.app surface discovery (Cowork) only ever sees the tree
+        // a test fabricates, never the real user's sessions. Mirrors the per-OS
+        // logic in claudeSurfacePaths.getClaudeAppSupportDir().
+        APPDATA: path.join(args.homeDir, 'AppData', 'Roaming'),
+        XDG_CONFIG_HOME: path.join(args.homeDir, '.config'),
       },
       stdio: 'pipe',
     },
