@@ -100,3 +100,26 @@ All of this is undocumented internals (docs research confirmed) → defensive pa
 1. Write onboarding memory files (project context, Claude.app internals ground truth, repo seams) to the persistent memory directory + MEMORY.md index.
 2. Commit this design as `docs/superpowers/specs/2026-07-17-claude-ecosystem-design.md` on a new branch (e.g. `feature/claude-ecosystem`).
 3. Run Phase 0 spike; feed results back into the design before Phase 1.
+
+## Phase 0 spike results (executed 2026-07-17, app claude-code 2.1.209)
+
+**Metadata (Spike A — verified against live trees):**
+
+- Desktop `claude-code-sessions`: 33 sidecars, 100% parse, **33/33 `cliSessionId`→transcript join hits, 0 dupes**, `title`+`isArchived` present on all. Fields confirmed: `sessionId`, `cliSessionId`, `cwd`, `originCwd`, `lastFocusedAt`, `lastActivityAt`, `createdAt`, `model`, `effort`, `isArchived`, `title`, `titleSource`, `permissionMode`, …
+- Cowork `local-agent-mode-sessions`: 86 sidecars, 100% parse, **86/86 join hits, 0 dupes**, 5 archived, no orphans. Fields confirmed: `sessionId` (=`local_<uuid>`), `cliSessionId` (transcript basename, ≠ sessionId uuid), `cwd`, `userSelectedFolders`, `title`, `isArchived`, `lastActivityAt`, `vmProcessName`, `spaceId`, `accountName`, `emailAddress`, …
+- **CORRECTION to design assumption**: the account-level dir is **not always a UUID** — a literal `skills-plugin` account dir exists under `local-agent-mode-sessions`. The path walker MUST walk all subdirs, never regex-gate on UUID shape. (Spike A's walker already does; `claudeSessionIndex` + `claudeSurfacePaths` must too.)
+
+**Parser compat (record-type tally on real transcripts):**
+
+- Load-bearing types `assistant` (tool_use/text) and `user` (tool_result/prompt) are **identical** across surfaces → adoption + tool animation work unchanged; `transcriptParser` is generic on `record.type`, watcher path (`scanGlobalProjectDirs`) unchanged.
+- **`system/turn_duration` is ABSENT from all current transcripts — Cowork _and_ desktop.** Desktop doesn't need it (Stop hook drives turn-end). Cowork has no hooks → turn-end/waiting falls back to the **text-idle timer (5 s) + user-prompt reset**. Acceptable; documented. FUTURE ENHANCEMENT: parse the `result` record (present in richer Cowork transcripts) as a crisp turn-end, and in-transcript `system/permission_request`/`system/permission_response` (also observed) for accurate Cowork permission bubbles without the 7 s heuristic timer.
+- New harmless record types observed (`attachment`, `last-prompt`, `mode`, `result`, `rate_limit_event`, `command_lifecycle`) each log a one-time "unrecognized" warning today. `system/*` already skippable. **Phase 2 action**: add these to `knownSkippableTypes` to cut log noise.
+
+**Deep link (static decompile of `app.asar` + live probes):**
+
+- `claude://` scheme registered (Info.plist). Resume route: `case Fr.Resume: const l = searchParams.get("session"); l && UUIDre.test(l) ? importCliSession(l) : errorToast`. Error categories: `transcript_missing | auth_expired | network | other`. Also present: `claude://…/new?q=|prompt=&folder=&file=` (launch-with-prompt, future) and `claude://cowork/shared-artifact?uuid=` (artifacts only).
+- **Desktop focus — WORKS (live-confirmed):** `open "claude://resume?session=<cliSessionId>"` → log `LocalSessions.setFocusedSession: local_<uuid>` → `Warming session` → `warmed successfully`. For desktop, sessionId = `local_<cliSessionId>` (uuid equal).
+- **Cowork focus — FAILS (live-confirmed):** same URL with a Cowork `cliSessionId` → `[error] Failed to import CLI session: CLI session transcript not found` (= `transcript_missing` toast). `importCliSession` only searches the global `~/.claude/projects/`; Cowork transcripts live in the private per-session `.claude` home. **The Cowork URL route ONLY handles `/shared-artifact` and `/new` — there is NO deep link to focus an existing Cowork session by id.**
+- **DECISION (updates Phase 4):** `buildFocusUri()` returns `claude://resume?session=<cliSessionId>` **only for `surface !== 'cowork'`** (desktop/CLI). For `surface === 'cowork'` it returns null → generic launcher calls `activateApp('Claude')` (front the app). The design's "null → activateApp" fallback is thus **required for Cowork, not optional**. Click always does something.
+
+**Phase 0 exit: PASS.** Metadata confirmed; deep-link shape confirmed (desktop) and rejected (Cowork, with chosen fallback); adoption de-risked by parser analysis (throwaway-branch adoption test folded into Phase 2 e2e, which fabricates a Cowork tree). Proceed to Phase 1.
