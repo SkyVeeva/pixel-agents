@@ -124,6 +124,10 @@ export interface HookProvider {
   readonly sessionFilePattern?: string;
   /** Parse one line of a transcript file into an AgentEvent. */
   parseTranscriptLine?(line: string): AgentEvent | null;
+  /** Build a deep link that focuses/fronts the given session in its host app,
+   *  or null when no per-session link exists (the caller then just activates
+   *  the app). Consumed by the focus layer for terminal-less agents. */
+  buildFocusUri?(ctx: { sessionId: string; surface?: string }): string | null;
   /** Build CLI launch command for +Agent button. */
   buildLaunchCommand?(
     sessionId: string,

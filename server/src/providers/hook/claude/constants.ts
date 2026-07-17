@@ -53,3 +53,12 @@ export const DESKTOP_SESSIONS_DIR_NAME = 'claude-code-sessions';
 
 /** Per-session directory / sidecar filename prefix (e.g. local_<uuid>). */
 export const CLAUDE_APP_SESSION_DIR_PREFIX = 'local_';
+
+/** Deep-link prefix that fronts a Claude Code session in Claude.app. The
+ *  cliSessionId is appended (URI-encoded). Verified against the app's own
+ *  `claude://resume` route (Phase 0). */
+export const CLAUDE_APP_RESUME_URI_PREFIX = 'claude://resume?session=';
+
+/** Application name passed to the OS "activate this app" fallback when no
+ *  per-session deep link exists (Cowork). */
+export const CLAUDE_APP_NAME = 'Claude';

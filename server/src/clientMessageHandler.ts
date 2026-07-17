@@ -1,9 +1,11 @@
 import { buildAgentDiagnostics } from './agentDiagnostics.js';
 import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
+import { focusViaUriOrApp } from './appFocus.js';
 import type { LoadedAssets, LoadedCharacterSprites, LoadedPetSprites } from './assetLoader.js';
 import { readConfig, writeConfig } from './configPersistence.js';
 import { readLayoutFromFile, writeLayoutToFile } from './layoutPersistence.js';
+import { CLAUDE_APP_NAME } from './providers/hook/claude/constants.js';
 import { claudeProvider } from './providers/index.js';
 
 type WsSend = (message: Record<string, unknown>) => void;
@@ -186,9 +188,21 @@ export function handleClientMessage(
       break;
     }
 
+    case 'focusAgent': {
+      // No terminal in standalone — front the session's host app instead.
+      const agent = store.get(msg.id as number);
+      if (agent) {
+        const uri =
+          claudeProvider.buildFocusUri?.({ sessionId: agent.sessionId, surface: agent.surface }) ??
+          null;
+        focusViaUriOrApp(uri, CLAUDE_APP_NAME);
+      }
+      break;
+    }
+
     default:
-      // focusAgent, exportLayout, importLayout
-      // require IDE-specific handling (not yet implemented for standalone)
+      // exportLayout / importLayout require IDE-specific handling
+      // (delegated to the host in embedded mode; not applicable to standalone).
       break;
   }
 }

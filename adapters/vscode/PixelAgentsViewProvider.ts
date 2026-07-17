@@ -7,6 +7,7 @@ import type { StateAdapter } from '../../core/src/adapter.js';
 import { buildAgentDiagnostics } from '../../server/src/agentDiagnostics.js';
 import { AgentRuntime } from '../../server/src/agentRuntime.js';
 import { AgentStateStore } from '../../server/src/agentStateStore.js';
+import { focusViaUriOrApp } from '../../server/src/appFocus.js';
 import type {
   LoadedAssets,
   LoadedCharacterSprites,
@@ -33,6 +34,7 @@ import {
   watchLayoutFile,
   writeLayoutToFile,
 } from '../../server/src/layoutPersistence.js';
+import { CLAUDE_APP_NAME } from '../../server/src/providers/hook/claude/constants.js';
 import { claudeProvider, copyHookScript } from '../../server/src/providers/index.js';
 import { PixelAgentsServer } from '../../server/src/server.js';
 import {
@@ -260,12 +262,22 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         if (agent) {
           if (agent.terminalRef) {
             agent.terminalRef.show();
-          } else if (agent.leadAgentId !== undefined) {
+          } else if (
+            agent.leadAgentId !== undefined &&
+            this.store.get(agent.leadAgentId)?.terminalRef
+          ) {
             // Teammate (tmux): focus the lead's terminal instead
-            const lead = this.store.get(agent.leadAgentId);
-            if (lead?.terminalRef) {
-              lead.terminalRef.show();
-            }
+            this.store.get(agent.leadAgentId)!.terminalRef!.show();
+          } else {
+            // No terminal (external / Cowork / desktop session): front the
+            // session in its host app via the provider's deep link, falling
+            // back to just activating the app when no per-session link exists.
+            const uri =
+              claudeProvider.buildFocusUri?.({
+                sessionId: agent.sessionId,
+                surface: agent.surface,
+              }) ?? null;
+            focusViaUriOrApp(uri, CLAUDE_APP_NAME);
           }
         }
       } else if (message.type === 'closeAgent') {

@@ -8,6 +8,7 @@ import {
   BASH_COMMAND_DISPLAY_MAX_LENGTH,
   TASK_DESCRIPTION_DISPLAY_MAX_LENGTH,
 } from '../../../constants.js';
+import { buildClaudeFocusUri } from './claudeAppFocus.js';
 import {
   areHooksInstalled as installerAreHooksInstalled,
   installHooks as installerInstallHooks,
@@ -285,6 +286,7 @@ export const claudeProvider: HookProvider = {
   getAllSessionRoots,
   getAuxiliarySessionRoots,
   sessionFilePattern: '*.jsonl',
+  buildFocusUri: buildClaudeFocusUri,
   buildLaunchCommand,
 
   team: claudeTeamProvider,
