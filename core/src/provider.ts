@@ -7,6 +7,7 @@
  * speculation.
  */
 
+import type { SessionIndexProvider } from './sessionIndexProvider.js';
 import type { TeamProvider } from './teamProvider.js';
 
 // ── Normalized Events (all provider types produce these) ──────
@@ -139,6 +140,13 @@ export interface HookProvider {
   /** Optional reference to a TeamProvider. When set, the hook handler registers team-aware
    *  branches (subagent routing, teammate discovery, permission forwarding, etc.). */
   readonly team?: TeamProvider;
+
+  // ── Optional session-metadata extension (Claude.app sidecars; absent for CLIs with none) ──
+
+  /** Optional reference to a SessionIndexProvider. When set, the runtime polls
+   *  it to enrich agents with a title/surface and to drive archive-based
+   *  removal (see AgentRuntime.startSessionIndexPolling). */
+  readonly sessionIndex?: SessionIndexProvider;
 }
 
 // TODO(provider type taxonomy): FileProvider (polling-only CLIs) and StreamProvider

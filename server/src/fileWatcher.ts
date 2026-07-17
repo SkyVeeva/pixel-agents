@@ -25,6 +25,7 @@ import type * as vscode from 'vscode';
 const debug = process.env.PIXEL_AGENTS_DEBUG !== '0';
 
 import type { HookProvider } from '../../core/src/provider.js';
+import type { SessionInfo } from '../../core/src/sessionIndexProvider.js';
 import type { TeamProvider } from '../../core/src/teamProvider.js';
 import type { ITerminalAdapter } from '../../core/src/terminalAdapter.js';
 import type { AgentStateStore } from './agentStateStore.js';
@@ -584,6 +585,22 @@ export function setFolderNameResolver(resolver: FolderNameResolver): void {
 }
 
 /**
+ * Resolves a session's `cliSessionId` (transcript basename) to its Claude.app
+ * sidecar metadata, so a freshly-adopted agent shows its real title from the
+ * first frame and the scanner can skip archived sessions. Registered by
+ * AgentRuntime against the provider's SessionIndexProvider; unset when the
+ * provider has no session index (label just falls back to folderName).
+ */
+export type SessionInfoResolver = (cliSessionId: string) => SessionInfo | undefined;
+
+let sessionInfoResolver: SessionInfoResolver | null = null;
+
+/** Register the cliSessionId → SessionInfo resolver (see SessionIndexProvider). */
+export function setSessionInfoResolver(resolver: SessionInfoResolver): void {
+  sessionInfoResolver = resolver;
+}
+
+/**
  * Scan the provider's teammate transcripts for a given lead session.
  * Each teammate gets its own independent agent (positive ID) with file watching.
  *
@@ -982,6 +999,15 @@ function adoptExternalSession(
     outputTokens: 0,
   };
 
+  // Adoption-time enrichment: give the character its real title (and surface,
+  // for hook/global paths that didn't already know it) from the first frame,
+  // so the label is never the transient hash/"outputs" placeholder.
+  const info = sessionInfoResolver?.(agent.sessionId);
+  if (info) {
+    if (info.title) agent.sessionTitle = info.title;
+    if (!agent.surface && info.surface) agent.surface = info.surface;
+  }
+
   agents.set(id, agent);
   persistAgents();
 
@@ -1274,6 +1300,12 @@ function scanGlobalProjectDirs(
       } catch {
         continue;
       }
+
+      // Archived-session gate: don't adopt a session the user has archived.
+      // Checked here (not just via poller removal) to avoid an adopt→remove
+      // flicker every scan tick for an archived-but-still-recent transcript.
+      const cliSessionId = path.basename(file, '.jsonl');
+      if (sessionInfoResolver?.(cliSessionId)?.isArchived) continue;
 
       // For Cowork sessions the projectDir basename is an opaque hash of the
       // private-home path, so folderNameFromProjectDir would yield garbage.

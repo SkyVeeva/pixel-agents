@@ -13,7 +13,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import type { HookProvider } from '../../core/src/provider.js';
+import type { SessionInfo } from '../../core/src/sessionIndexProvider.js';
 import type { AgentStateStore } from './agentStateStore.js';
+import { SESSION_INDEX_POLL_INTERVAL_MS } from './constants.js';
 import { DismissalTracker } from './dismissalTracker.js';
 import {
   adoptExternalSessionFromHook,
@@ -24,6 +26,7 @@ import {
   setAgentRemovalCallback,
   setDismissalTracker,
   setHookProvider as setFileWatcherHookProvider,
+  setSessionInfoResolver,
   setTeammateRemovalCallback,
   setTeamProvider,
   startExternalSessionScanning,
@@ -59,6 +62,13 @@ export class AgentRuntime {
   readonly activeAgentId = { current: null as number | null };
   private externalScanTimer: ReturnType<typeof setInterval> | null = null;
   private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
+  private sessionIndexTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** Provider reference (for its optional sessionIndex extension). */
+  private readonly provider: HookProvider;
+  /** Latest cliSessionId -> SessionInfo snapshot from the session-index poller.
+   *  Backs the fileWatcher resolver (adoption enrichment + archived-skip). */
+  private readonly sessionInfoCache = new Map<string, SessionInfo>();
 
   // Configuration refs (mutable, shared with scanners)
   readonly watchAllSessions = { current: false };
@@ -75,11 +85,17 @@ export class AgentRuntime {
     provider: HookProvider,
   ) {
     // Wire module-level dependencies
+    this.provider = provider;
     setDismissalTracker(this.dismissalTracker);
     setHookProvider(provider);
     setFileWatcherHookProvider(provider);
     if (provider.team) {
       setTeamProvider(provider.team);
+    }
+    if (provider.sessionIndex) {
+      // Resolver reads the poller's cache: cliSessionId -> SessionInfo. Used for
+      // adoption-time title/surface enrichment and the archived-session skip.
+      setSessionInfoResolver((cliSessionId) => this.sessionInfoCache.get(cliSessionId));
     }
     setAgentRemovalCallback((id) => this.removeAgent(id));
     setTeammateRemovalCallback((id) => this.removeTeammate(id, 'team-config'));
@@ -337,6 +353,82 @@ export class AgentRuntime {
     );
   }
 
+  /**
+   * Poll the provider's SessionIndexProvider (if any) to keep agents' title +
+   * surface in sync with the Claude.app sidecars and to drive metadata-based
+   * lifecycle. Runs in BOTH hooks and heuristic mode (Cowork never fires hooks).
+   * A no-op when the provider has no session index.
+   *
+   * Each tick: refresh the resolver cache, then for every agent join by
+   * `sessionId === cliSessionId` (with a Cowork transcript-path-prefix fallback)
+   * and: remove if archived; remove a Cowork agent whose metadata vanished;
+   * otherwise broadcast an agentSessionInfo only when title/surface changed.
+   */
+  startSessionIndexPolling(): void {
+    const sessionIndex = this.provider.sessionIndex;
+    if (!sessionIndex || this.sessionIndexTimer) return;
+
+    const tick = (): void => {
+      let entries;
+      try {
+        entries = sessionIndex.listSessions();
+      } catch {
+        return; // defensive: a bad read must not disturb running agents
+      }
+
+      // Refresh the resolver cache and build join lookups.
+      this.sessionInfoCache.clear();
+      const byId = new Map<string, SessionInfo>();
+      const byPrefix: { prefix: string; info: SessionInfo }[] = [];
+      for (const entry of entries) {
+        this.sessionInfoCache.set(entry.sessionId, entry.info);
+        byId.set(entry.sessionId, entry.info);
+        if (entry.info.transcriptDirPrefix) {
+          byPrefix.push({ prefix: entry.info.transcriptDirPrefix, info: entry.info });
+        }
+      }
+
+      const toRemove: number[] = [];
+      for (const [id, agent] of this.store) {
+        let info = byId.get(agent.sessionId);
+        if (!info) {
+          info = byPrefix.find((p) => agent.jsonlFile.startsWith(p.prefix))?.info;
+        }
+
+        if (!info) {
+          // Metadata gone. Cowork has no hooks/stale-check governing it, so the
+          // poller is its lifecycle owner — remove. Other surfaces keep their
+          // existing lifecycle (hooks / stale check).
+          if (agent.surface === 'cowork') toRemove.push(id);
+          continue;
+        }
+
+        if (info.isArchived) {
+          toRemove.push(id);
+          continue;
+        }
+
+        const nextSurface = agent.surface ?? info.surface;
+        const nextTitle = info.title ?? agent.sessionTitle;
+        if (nextTitle !== agent.sessionTitle || nextSurface !== agent.surface) {
+          agent.sessionTitle = nextTitle;
+          agent.surface = nextSurface;
+          this.store.broadcast({
+            type: 'agentSessionInfo',
+            id,
+            title: agent.sessionTitle,
+            surface: agent.surface,
+          });
+        }
+      }
+
+      for (const id of toRemove) this.removeAgent(id);
+    };
+
+    tick(); // prime the cache immediately so first-adoption enrichment works
+    this.sessionIndexTimer = setInterval(tick, SESSION_INDEX_POLL_INTERVAL_MS);
+  }
+
   // ── Restore persisted external agents (standalone) ──
 
   /**
@@ -447,6 +539,10 @@ export class AgentRuntime {
     if (this.externalScanTimer) {
       clearInterval(this.externalScanTimer);
       this.externalScanTimer = null;
+    }
+    if (this.sessionIndexTimer) {
+      clearInterval(this.sessionIndexTimer);
+      this.sessionIndexTimer = null;
     }
     if (this.staleCheckTimer) {
       clearInterval(this.staleCheckTimer);

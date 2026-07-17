@@ -13,6 +13,7 @@ import {
   installHooks as installerInstallHooks,
   uninstallHooks as installerUninstallHooks,
 } from './claudeHookInstaller.js';
+import { claudeSessionIndex } from './claudeSessionIndex.js';
 import { getCoworkAuxProjectRoots } from './claudeSurfacePaths.js';
 import { claudeTeamProvider } from './claudeTeamProvider.js';
 import { CLAUDE_TERMINAL_NAME_PREFIX } from './constants.js';
@@ -287,4 +288,5 @@ export const claudeProvider: HookProvider = {
   buildLaunchCommand,
 
   team: claudeTeamProvider,
+  sessionIndex: claudeSessionIndex,
 };

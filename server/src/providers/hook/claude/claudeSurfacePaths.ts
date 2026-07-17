@@ -117,6 +117,42 @@ export function getCoworkAuxProjectRoots(): string[] {
   return out;
 }
 
+/** Metadata sidecar for a Cowork session — the `local_<uuid>.json` file sitting
+ *  beside the `local_<uuid>/` session directory. */
+export function getCoworkSessionMetadataFile(sessionDir: string): string {
+  return `${sessionDir}.json`;
+}
+
+/**
+ * Every desktop-app ("Code" tab) session metadata sidecar
+ * (`.../claude-code-sessions/<account>/<user>/local_<uuid>.json`). Desktop
+ * transcripts live in the normal global ~/.claude/projects, so only the sidecar
+ * is here. Account/user levels are walked without a UUID shape assumption.
+ */
+export function listDesktopSessionMetadataFiles(): string[] {
+  const root = getDesktopSessionMetadataRoot();
+  if (!root) return [];
+  const out: string[] = [];
+  for (const account of safeReadDirs(root)) {
+    const accountDir = path.join(root, account);
+    for (const user of safeReadDirs(accountDir)) {
+      const userDir = path.join(accountDir, user);
+      let names: string[] = [];
+      try {
+        names = fs.readdirSync(userDir);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        if (name.startsWith(CLAUDE_APP_SESSION_DIR_PREFIX) && name.endsWith('.json')) {
+          out.push(path.join(userDir, name));
+        }
+      }
+    }
+  }
+  return out;
+}
+
 /** True when `p` lives under the Cowork sessions root. Used to protect Cowork
  *  agents from the "outside the workspace" external-agent cleanup. */
 export function isCoworkPath(p: string): boolean {

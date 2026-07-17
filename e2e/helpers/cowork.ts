@@ -35,6 +35,8 @@ export interface CoworkSessionHandle {
   sessionDir: string;
   /** The transcript file the watcher adopts. */
   transcriptPath: string;
+  /** The `local_<uuid>.json` metadata sidecar beside the session dir. */
+  metadataPath: string;
   /** The cliSessionId (transcript basename), i.e. the join key to metadata. */
   cliSessionId: string;
 }
@@ -95,6 +97,10 @@ export function writeCoworkSession(
     cliSessionId: string;
     projectHash?: string;
     readFileName?: string;
+    /** Human title written to the metadata sidecar (shows as "Cowork · <title>"). */
+    title?: string;
+    /** Whether the sidecar marks the session archived (drives poller removal). */
+    isArchived?: boolean;
   },
 ): CoworkSessionHandle {
   const account = opts.account ?? 'acct-e2e';
@@ -102,20 +108,60 @@ export function writeCoworkSession(
   const projectHash = opts.projectHash ?? '-cowork-e2e-outputs';
   const readFileName = opts.readFileName ?? 'demo.ts';
 
-  const sessionDir = path.join(
+  const userDir = path.join(
     claudeAppSupportDir(tmpHome),
     'local-agent-mode-sessions',
     account,
     user,
-    `local_${opts.cliSessionId}`,
   );
+  const sessionDir = path.join(userDir, `local_${opts.cliSessionId}`);
   const projectsDir = path.join(sessionDir, '.claude', 'projects', projectHash);
   fs.mkdirSync(projectsDir, { recursive: true });
 
   const transcriptPath = path.join(projectsDir, `${opts.cliSessionId}.jsonl`);
   fs.writeFileSync(transcriptPath, buildTranscript(opts.cliSessionId, readFileName), 'utf8');
 
-  return { sessionDir, transcriptPath, cliSessionId: opts.cliSessionId };
+  const metadataPath = `${sessionDir}.json`;
+  writeCoworkMetadata(metadataPath, opts.cliSessionId, opts.title, opts.isArchived ?? false);
+
+  return { sessionDir, transcriptPath, metadataPath, cliSessionId: opts.cliSessionId };
+}
+
+function writeCoworkMetadata(
+  metadataPath: string,
+  cliSessionId: string,
+  title: string | undefined,
+  isArchived: boolean,
+): void {
+  fs.writeFileSync(
+    metadataPath,
+    JSON.stringify({
+      sessionId: `local_${cliSessionId}`,
+      cliSessionId,
+      title,
+      isArchived,
+      cwd: '/cowork/outputs',
+    }),
+    'utf8',
+  );
+}
+
+/** Rewrite a session's metadata sidecar (e.g. flip isArchived, rename title) —
+ *  simulates the user archiving or renaming the session in Claude.app. */
+export function updateCoworkMetadata(
+  handle: CoworkSessionHandle,
+  patch: { title?: string; isArchived?: boolean },
+): void {
+  const current = JSON.parse(fs.readFileSync(handle.metadataPath, 'utf8')) as {
+    title?: string;
+    isArchived?: boolean;
+  };
+  writeCoworkMetadata(
+    handle.metadataPath,
+    handle.cliSessionId,
+    patch.title ?? current.title,
+    patch.isArchived ?? current.isArchived ?? false,
+  );
 }
 
 /** Remove a fabricated Cowork session dir (simulates the user archiving/closing it). */

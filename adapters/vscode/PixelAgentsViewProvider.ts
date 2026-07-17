@@ -532,6 +532,10 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
 
         this.runtime.startStaleCheck();
 
+        // Enrich titles/surface + drive Cowork lifecycle (no-op without a
+        // provider session index). Independent of workspace project dirs.
+        this.runtime.startSessionIndexPolling();
+
         // Load furniture assets BEFORE sending layout
         (async () => {
           try {

@@ -220,6 +220,11 @@ async function main(): Promise<void> {
       runtime.startStaleCheck();
     }
 
+    // Session-index polling is independent of any workspace project dir — it
+    // enriches titles/surface and drives Cowork lifecycle. No-op without a
+    // provider session index.
+    runtime.startSessionIndexPolling();
+
     console.log(`\n  Pixel Agents server running at http://${args.host}:${config.port}\n`);
 
     // ── Graceful shutdown ──

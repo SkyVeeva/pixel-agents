@@ -1,5 +1,5 @@
 import { expect, test } from '../../fixtures/standalone';
-import { writeCoworkSession } from '../../helpers/cowork';
+import { updateCoworkMetadata, writeCoworkSession } from '../../helpers/cowork';
 import { expectOverlayCount, expectOverlayVisible } from '../../helpers/office';
 import type { RecordedServerMessage } from '../../helpers/standalone';
 import { setSettings } from '../../helpers/webview';
@@ -44,6 +44,30 @@ test.describe('Standalone / cowork', () => {
     // Turning the toggle OFF despawns the Cowork character immediately
     // (removeAgentsBySurface), not on a stale-check delay.
     await setSettings(page, { watchCoworkSessions: false });
+    await expectOverlayCount(page, 0);
+  });
+
+  test('shows the session title from metadata and despawns when the session is archived @area:standalone', async ({
+    page,
+    standalone,
+  }) => {
+    await setSettings(page, { alwaysShowLabels: true, watchCoworkSessions: true });
+    await standalone.drainMessages();
+
+    const cliSessionId = 'cowork-title-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const handle = writeCoworkSession(standalone.tmpHome, {
+      cliSessionId,
+      title: 'Precision deck',
+    });
+
+    // The session-index poller joins the sidecar to the adopted agent and
+    // surfaces its human title, prefixed with the surface ("Cowork · <title>").
+    await expectOverlayCount(page, 1);
+    await expectOverlayVisible(page, 'Cowork · Precision deck');
+
+    // Archiving the session in Claude.app (flip the sidecar) drives poller
+    // removal — the character despawns without any toggle change.
+    updateCoworkMetadata(handle, { isArchived: true });
     await expectOverlayCount(page, 0);
   });
 });
