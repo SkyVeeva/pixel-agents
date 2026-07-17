@@ -15,6 +15,9 @@ export const WANDER_PAUSE_MIN_SEC = 2.0;
 export const WANDER_PAUSE_MAX_SEC = 20.0;
 export const WANDER_MOVES_BEFORE_REST_MIN = 3;
 export const WANDER_MOVES_BEFORE_REST_MAX = 6;
+/** While idle, an agent stays at least this many tiles (Manhattan) from its
+ *  seat and mills there, instead of returning to sit at its desk. */
+export const IDLE_MIN_DISTANCE_FROM_SEAT_TILES = 3;
 export const SEAT_REST_MIN_SEC = 120.0;
 export const SEAT_REST_MAX_SEC = 240.0;
 

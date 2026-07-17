@@ -1,4 +1,5 @@
 import {
+  IDLE_MIN_DISTANCE_FROM_SEAT_TILES,
   SEAT_REST_MAX_SEC,
   SEAT_REST_MIN_SEC,
   TYPE_FRAME_DURATION_SEC,
@@ -14,6 +15,7 @@ import type { CharacterSprites } from '../sprites/spriteData.js';
 import { isReadingToolName } from '../toolUtils.js';
 import type { Character, Seat, SpriteData, TileType as TileTypeVal } from '../types.js';
 import { CharacterState, Direction, TILE_SIZE } from '../types.js';
+import { idleWanderCandidates } from './idleWander.js';
 
 /** Whether a tool should show the reading animation (vs typing). Taxonomy comes
  *  from the active HookProvider via the `providerCapabilities` message. */
@@ -163,30 +165,18 @@ export function updateCharacter(
       // Countdown wander timer
       ch.wanderTimer -= dt;
       if (ch.wanderTimer <= 0) {
-        // Check if we've wandered enough — return to seat for a rest
-        if (ch.wanderCount >= ch.wanderLimit && ch.seatId) {
-          const seat = seats.get(ch.seatId);
-          if (seat) {
-            const path = findPath(
-              ch.tileCol,
-              ch.tileRow,
-              seat.seatCol,
-              seat.seatRow,
-              tileMap,
-              blockedTiles,
-            );
-            if (path.length > 0) {
-              ch.path = path;
-              ch.moveProgress = 0;
-              ch.state = CharacterState.WALK;
-              ch.frame = 0;
-              ch.frameTimer = 0;
-              break;
-            }
-          }
-        }
-        if (walkableTiles.length > 0) {
-          const target = walkableTiles[Math.floor(Math.random() * walkableTiles.length)];
+        // Idle agents stay away from their desk: never return to sit while idle.
+        // Pick a wander target that keeps ≥ IDLE_MIN_DISTANCE_FROM_SEAT_TILES
+        // from the seat (best-effort in cramped layouts; free wander with no seat).
+        const seat = ch.seatId ? seats.get(ch.seatId) : undefined;
+        const seatPos = seat ? { col: seat.seatCol, row: seat.seatRow } : null;
+        const candidates = idleWanderCandidates(
+          seatPos,
+          walkableTiles,
+          IDLE_MIN_DISTANCE_FROM_SEAT_TILES,
+        );
+        if (candidates.length > 0) {
+          const target = candidates[Math.floor(Math.random() * candidates.length)];
           const path = findPath(
             ch.tileCol,
             ch.tileRow,
@@ -201,7 +191,6 @@ export function updateCharacter(
             ch.state = CharacterState.WALK;
             ch.frame = 0;
             ch.frameTimer = 0;
-            ch.wanderCount++;
           }
         }
         ch.wanderTimer = randomRange(WANDER_PAUSE_MIN_SEC, WANDER_PAUSE_MAX_SEC);
