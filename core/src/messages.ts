@@ -71,6 +71,11 @@ export interface AgentCreated {
   id: number;
   folderName?: string;
   isExternal?: boolean;
+  isTeammate?: boolean;
+  teammateName?: string;
+  parentAgentId?: number;
+  teamName?: string;
+  hooksOnly?: boolean;
 }
 
 export interface AgentClosed {

@@ -179,6 +179,21 @@ components:
           type: string
         isExternal:
           type: boolean
+        isTeammate:
+          type: boolean
+          description: True when this agent is a teammate of a team lead.
+        teammateName:
+          type: string
+          description: The teammate's role name within its team (Agent Teams).
+        parentAgentId:
+          type: integer
+          description: The lead agent's id when this agent is a teammate.
+        teamName:
+          type: string
+          description: Name of the Agent Teams team this agent belongs to.
+        hooksOnly:
+          type: boolean
+          description: True when the agent is tracked purely via hooks (no JSONL fallback).
 
     AgentClosed:
       description: An agent has been removed from the office.
