@@ -18,6 +18,8 @@ interface SettingsModalProps {
   externalAssetDirectories: string[];
   watchAllSessions: boolean;
   onToggleWatchAllSessions: () => void;
+  watchCoworkSessions: boolean;
+  onToggleWatchCoworkSessions: () => void;
   hooksEnabled: boolean;
   onToggleHooksEnabled: () => void;
   /** Whether the areas overlay is rendered outside of the Areas edit tool. */
@@ -41,6 +43,8 @@ export function SettingsModal({
   externalAssetDirectories,
   watchAllSessions,
   onToggleWatchAllSessions,
+  watchCoworkSessions,
+  onToggleWatchCoworkSessions,
   hooksEnabled,
   onToggleHooksEnabled,
   showAreas,
@@ -174,6 +178,11 @@ export function SettingsModal({
         label="Watch All Sessions"
         checked={watchAllSessions}
         onChange={onToggleWatchAllSessions}
+      />
+      <Checkbox
+        label="Watch Cowork Sessions"
+        checked={watchCoworkSessions}
+        onChange={onToggleWatchCoworkSessions}
       />
       <Checkbox
         label="Instant Detection (Hooks)"

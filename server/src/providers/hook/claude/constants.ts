@@ -33,3 +33,23 @@ export const CLAUDE_HOOK_EVENTS = [
 /** Terminal name prefix used when launching Claude Code in VS Code.
  *  Used by the extension to match terminals to agents for adoption. */
 export const CLAUDE_TERMINAL_NAME_PREFIX = 'Claude Code';
+
+// ── Claude.app (desktop + Cowork) support-directory layout ──
+//
+// Undocumented internals of the Claude desktop app, verified 2026-07-17 against
+// app claude-code 2.1.209 (see docs/superpowers/specs). All names live here so
+// tmpHome-based tests and future OS ports have a single source of truth.
+
+/** Application-support subdirectory name for the Claude desktop app. */
+export const CLAUDE_APP_SUPPORT_DIR_NAME = 'Claude';
+
+/** Holds Cowork ("local agent mode") per-session directories, each with a
+ *  private `.claude` home. No settings.json inside -> hooks never fire. */
+export const COWORK_SESSIONS_DIR_NAME = 'local-agent-mode-sessions';
+
+/** Holds desktop-app (Code tab) session metadata sidecars. Transcripts for
+ *  these sessions live in the normal global ~/.claude/projects. */
+export const DESKTOP_SESSIONS_DIR_NAME = 'claude-code-sessions';
+
+/** Per-session directory / sidecar filename prefix (e.g. local_<uuid>). */
+export const CLAUDE_APP_SESSION_DIR_PREFIX = 'local_';

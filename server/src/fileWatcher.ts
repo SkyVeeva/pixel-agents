@@ -922,6 +922,7 @@ function adoptExternalSession(
 
   persistAgents: () => void,
   folderName?: string,
+  surface?: string,
 ): void {
   const id = nextAgentIdRef.current++;
   // Decide whether to replay the existing file content or skip to its end.
@@ -976,6 +977,7 @@ function adoptExternalSession(
     linesProcessed: 0,
     seenUnknownRecordTypes: new Set(),
     folderName,
+    surface,
     inputTokens: 0,
     outputTokens: 0,
   };
@@ -1016,6 +1018,7 @@ export function startExternalSessionScanning(
   persistAgents: () => void,
   watchAllSessionsRef?: { current: boolean },
   hooksEnabledRef?: { current: boolean },
+  watchCoworkSessionsRef?: { current: boolean },
 ): ReturnType<typeof setInterval> {
   return setInterval(() => {
     // When hooks are active, SessionStart handles workspace session detection.
@@ -1037,7 +1040,9 @@ export function startExternalSessionScanning(
         );
       }
     }
-    // If "Watch All Sessions" is ON, also scan all global project dirs
+    // If "Watch All Sessions" is ON, scan all global project dirs. These run
+    // in BOTH hooks and heuristic mode because hooks can't detect sessions that
+    // were already running (or, for Cowork, never fire at all).
     if (watchAllSessionsRef?.current) {
       scanGlobalProjectDirs(
         knownJsonlFiles,
@@ -1048,6 +1053,24 @@ export function startExternalSessionScanning(
         waitingTimers,
         permissionTimers,
         persistAgents,
+        hookProvider?.getAllSessionRoots?.() ?? [],
+      );
+    }
+    // If "Watch Cowork Sessions" is ON, scan the Cowork auxiliary roots. Gated
+    // independently of Watch All so a user can surface Cowork without adopting
+    // every other project's sessions. Adopted agents are tagged surface=cowork.
+    if (watchCoworkSessionsRef?.current) {
+      scanGlobalProjectDirs(
+        knownJsonlFiles,
+        nextAgentIdRef,
+        agents,
+        fileWatchers,
+        pollingTimers,
+        waitingTimers,
+        permissionTimers,
+        persistAgents,
+        hookProvider?.getAuxiliarySessionRoots?.() ?? [],
+        'cowork',
       );
     }
   }, EXTERNAL_SCAN_INTERVAL_MS);
@@ -1201,8 +1224,9 @@ function scanGlobalProjectDirs(
   permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
 
   persistAgents: () => void,
+  roots: string[],
+  surface?: string,
 ): void {
-  const roots = hookProvider?.getAllSessionRoots?.() ?? [];
   if (roots.length === 0) return;
 
   const projectDirs: string[] = [];
@@ -1251,12 +1275,17 @@ function scanGlobalProjectDirs(
         continue;
       }
 
-      const folderName =
-        folderNameResolver?.({ projectDir: dirPath }) ??
-        folderNameFromProjectDir(path.basename(dirPath));
+      // For Cowork sessions the projectDir basename is an opaque hash of the
+      // private-home path, so folderNameFromProjectDir would yield garbage.
+      // Leave folderName unset — the session-index poller supplies the real
+      // human title (Phase 3). Non-Cowork global sessions keep folder naming.
+      const folderName = surface
+        ? undefined
+        : (folderNameResolver?.({ projectDir: dirPath }) ??
+          folderNameFromProjectDir(path.basename(dirPath)));
       knownJsonlFiles.add(file);
       console.log(
-        `[Pixel Agents] Watcher: detected global session ${path.basename(file)} (${folderName})`,
+        `[Pixel Agents] Watcher: detected ${surface ?? 'global'} session ${path.basename(file)} (${folderName ?? surface})`,
       );
       adoptExternalSession(
         file,
@@ -1269,6 +1298,7 @@ function scanGlobalProjectDirs(
         permissionTimers,
         persistAgents,
         folderName,
+        surface,
       );
     }
   }

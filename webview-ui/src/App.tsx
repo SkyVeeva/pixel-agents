@@ -81,6 +81,8 @@ function App() {
     extensionVersion,
     watchAllSessions,
     setWatchAllSessions,
+    watchCoworkSessions,
+    setWatchCoworkSessions,
     alwaysShowLabels,
     hooksEnabled,
     setHooksEnabled,
@@ -514,6 +516,12 @@ function App() {
           const newVal = !watchAllSessions;
           setWatchAllSessions(newVal);
           transport.send({ type: 'setWatchAllSessions', enabled: newVal });
+        }}
+        watchCoworkSessions={watchCoworkSessions}
+        onToggleWatchCoworkSessions={() => {
+          const newVal = !watchCoworkSessions;
+          setWatchCoworkSessions(newVal);
+          transport.send({ type: 'setWatchCoworkSessions', enabled: newVal });
         }}
         hooksEnabled={hooksEnabled}
         onToggleHooksEnabled={() => {

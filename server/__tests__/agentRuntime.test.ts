@@ -76,3 +76,62 @@ describe('AgentRuntime -- D5 foreign-session gate', () => {
     expect(store.size).toBe(1);
   });
 });
+
+describe('AgentRuntime -- removeAgentsBySurface', () => {
+  let runtime: AgentRuntime;
+  let store: AgentStateStore;
+
+  afterEach(() => runtime?.dispose());
+
+  function seedAgent(id: number, surface?: string): void {
+    store.set(id, {
+      id,
+      sessionId: `sess-${id}`,
+      isExternal: true,
+      projectDir: `/proj-${id}`,
+      jsonlFile: `/proj-${id}/sess-${id}.jsonl`,
+      fileOffset: 0,
+      lineBuffer: '',
+      activeToolIds: new Set(),
+      activeToolStatuses: new Map(),
+      activeToolNames: new Map(),
+      activeSubagentToolIds: new Map(),
+      activeSubagentToolNames: new Map(),
+      backgroundAgentToolIds: new Set(),
+      isWaiting: false,
+      permissionSent: false,
+      hadToolsInTurn: false,
+      lastDataAt: 0,
+      linesProcessed: 0,
+      seenUnknownRecordTypes: new Set(),
+      hookDelivered: false,
+      inputTokens: 0,
+      outputTokens: 0,
+      surface,
+    });
+  }
+
+  it('removes only agents matching the given surface, leaving others intact', () => {
+    store = new AgentStateStore();
+    runtime = new AgentRuntime(store, claudeProvider);
+    seedAgent(1, 'cowork');
+    seedAgent(2, undefined); // a plain terminal session
+    seedAgent(3, 'cowork');
+    seedAgent(4, 'desktop');
+
+    runtime.removeAgentsBySurface('cowork');
+
+    expect(store.has(1)).toBe(false);
+    expect(store.has(3)).toBe(false);
+    expect(store.has(2)).toBe(true);
+    expect(store.has(4)).toBe(true);
+  });
+
+  it('is a no-op when no agent matches the surface', () => {
+    store = new AgentStateStore();
+    runtime = new AgentRuntime(store, claudeProvider);
+    seedAgent(1, undefined);
+    runtime.removeAgentsBySurface('cowork');
+    expect(store.size).toBe(1);
+  });
+});

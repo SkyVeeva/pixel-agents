@@ -112,6 +112,13 @@ export interface HookProvider {
    *  Sessions". Each returned dir contains subdirs whose entries are session
    *  transcript files. Undefined = this provider doesn't support global scan. */
   getAllSessionRoots?(): string[];
+  /** Additional transcript roots for sessions that never fire hooks and live
+   *  outside the primary session tree (e.g. Claude Cowork's per-session private
+   *  `.claude/projects`). Returned fresh each call so dynamically-created
+   *  sessions are picked up. Kept SEPARATE from getAllSessionRoots so discovery
+   *  of these can be gated by its own setting (watchCoworkSessions) independent
+   *  of "Watch All Sessions". Undefined = no auxiliary roots. */
+  getAuxiliarySessionRoots?(): string[];
   /** Glob pattern for session files (e.g., '*.jsonl'). */
   readonly sessionFilePattern?: string;
   /** Parse one line of a transcript file into an AgentEvent. */

@@ -338,7 +338,14 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           }
           const toRemove: number[] = [];
           for (const [id, agent] of this.store) {
-            if (agent.isExternal && !workspaceDirs.has(agent.projectDir)) {
+            // Cowork agents are governed by their own toggle (watchCoworkSessions),
+            // never by Watch All — skip them so turning Watch All off doesn't nuke
+            // every adopted Cowork character.
+            if (
+              agent.isExternal &&
+              !workspaceDirs.has(agent.projectDir) &&
+              agent.surface !== 'cowork'
+            ) {
               toRemove.push(id);
             }
           }
@@ -351,6 +358,14 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
             }
             this.runtime.removeAgent(id);
           }
+        }
+      } else if (message.type === 'setWatchCoworkSessions') {
+        const enabled = message.enabled as boolean;
+        this.adapter.setSetting(GLOBAL_KEY_WATCH_COWORK_SESSIONS, enabled);
+        this.runtime.watchCoworkSessions.current = enabled;
+        if (!enabled) {
+          // Despawn adopted Cowork characters immediately on toggle-off.
+          this.runtime.removeAgentsBySurface('cowork');
         }
       } else if (message.type === 'webviewReady') {
         // Flush any messages buffered while the iframe was loading. Mark
@@ -394,6 +409,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           false,
         );
         this.runtime.watchAllSessions.current = watchAllSessions;
+        this.runtime.watchCoworkSessions.current = watchCoworkSessions;
         const hooksEnabled = this.adapter.getSetting<boolean>(GLOBAL_KEY_HOOKS_ENABLED, true);
         const hooksInfoShown = this.adapter.getSetting<boolean>(GLOBAL_KEY_HOOKS_INFO_SHOWN, false);
         const showAreas = this.adapter.getSetting<boolean>(GLOBAL_KEY_SHOW_AREAS, false);

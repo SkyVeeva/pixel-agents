@@ -71,6 +71,8 @@ interface ExtensionMessageState {
   extensionVersion: string;
   watchAllSessions: boolean;
   setWatchAllSessions: (v: boolean) => void;
+  watchCoworkSessions: boolean;
+  setWatchCoworkSessions: (v: boolean) => void;
   alwaysShowLabels: boolean;
   hooksEnabled: boolean;
   setHooksEnabled: (v: boolean) => void;
@@ -115,6 +117,7 @@ export function useExtensionMessages(
   const [lastSeenVersion, setLastSeenVersion] = useState('');
   const [extensionVersion, setExtensionVersion] = useState('');
   const [watchAllSessions, setWatchAllSessions] = useState(false);
+  const [watchCoworkSessions, setWatchCoworkSessions] = useState(false);
   const [alwaysShowLabels, setAlwaysShowLabels] = useState(false);
   const [hooksEnabled, setHooksEnabled] = useState(true);
   const [hooksInfoShown, setHooksInfoShown] = useState(true);
@@ -581,6 +584,9 @@ export function useExtensionMessages(
         if (typeof msg.watchAllSessions === 'boolean') {
           setWatchAllSessions(msg.watchAllSessions as boolean);
         }
+        if (typeof msg.watchCoworkSessions === 'boolean') {
+          setWatchCoworkSessions(msg.watchCoworkSessions as boolean);
+        }
         if (typeof msg.alwaysShowLabels === 'boolean') {
           setAlwaysShowLabels(msg.alwaysShowLabels as boolean);
         }
@@ -661,6 +667,8 @@ export function useExtensionMessages(
     extensionVersion,
     watchAllSessions,
     setWatchAllSessions,
+    watchCoworkSessions,
+    setWatchCoworkSessions,
     alwaysShowLabels,
     hooksEnabled,
     setHooksEnabled,

@@ -62,6 +62,7 @@ export class AgentRuntime {
 
   // Configuration refs (mutable, shared with scanners)
   readonly watchAllSessions = { current: false };
+  readonly watchCoworkSessions = { current: false };
   readonly hooksEnabled = { current: true };
 
   // Dependencies
@@ -265,6 +266,24 @@ export class AgentRuntime {
     }
   }
 
+  /** Remove every agent originating from a given surface (e.g. 'cowork').
+   *  Used when the user turns the corresponding discovery toggle OFF. Clears the
+   *  agents' known-JSONL entries so they can be re-adopted if the toggle returns. */
+  removeAgentsBySurface(surface: string): void {
+    const toRemove: number[] = [];
+    for (const [id, agent] of this.store) {
+      if (agent.surface === surface) toRemove.push(id);
+    }
+    for (const id of toRemove) {
+      const agent = this.store.get(id);
+      if (agent) this.knownJsonlFiles.delete(agent.jsonlFile);
+      this.removeAgent(id);
+    }
+    if (toRemove.length > 0) {
+      console.log(`[Pixel Agents] Removed ${toRemove.length} ${surface} agent(s) (toggle off)`);
+    }
+  }
+
   // ── Scanning ──
 
   /** Start project-level scanning for a directory. */
@@ -303,6 +322,7 @@ export class AgentRuntime {
       () => this.store.persist(),
       this.watchAllSessions,
       this.hooksEnabled,
+      this.watchCoworkSessions,
     );
   }
 

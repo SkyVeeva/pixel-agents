@@ -13,6 +13,7 @@ import {
   installHooks as installerInstallHooks,
   uninstallHooks as installerUninstallHooks,
 } from './claudeHookInstaller.js';
+import { getCoworkAuxProjectRoots } from './claudeSurfacePaths.js';
 import { claudeTeamProvider } from './claudeTeamProvider.js';
 import { CLAUDE_TERMINAL_NAME_PREFIX } from './constants.js';
 
@@ -107,6 +108,13 @@ function buildLaunchCommand(
  *  global session scanner ("Watch All Sessions"). */
 function getAllSessionRoots(): string[] {
   return [path.join(os.homedir(), '.claude', 'projects')];
+}
+
+/** Auxiliary transcript roots for Claude Cowork sessions — the private
+ *  `.claude/projects` inside each live Cowork session dir. Recomputed each call
+ *  so newly-opened Cowork sessions are discovered. Gated by watchCoworkSessions. */
+function getAuxiliarySessionRoots(): string[] {
+  return getCoworkAuxProjectRoots();
 }
 
 // ── normalizeHookEvent: the single Claude-specific normalization boundary ──
@@ -274,6 +282,7 @@ export const claudeProvider: HookProvider = {
 
   getSessionDirs,
   getAllSessionRoots,
+  getAuxiliarySessionRoots,
   sessionFilePattern: '*.jsonl',
   buildLaunchCommand,
 

@@ -121,6 +121,18 @@ export function handleClientMessage(
       break;
     }
 
+    case 'setWatchCoworkSessions': {
+      const enabled = msg.enabled as boolean;
+      adapter?.setSetting(KEY_WATCH_COWORK_SESSIONS, enabled);
+      if (runtime) {
+        runtime.watchCoworkSessions.current = enabled;
+        // Turning discovery off despawns any adopted Cowork characters at once,
+        // rather than waiting for the stale check (which is off in hooks mode).
+        if (!enabled) runtime.removeAgentsBySurface('cowork');
+      }
+      break;
+    }
+
     case 'setHooksEnabled': {
       const enabled = msg.enabled as boolean;
       adapter?.setSetting(KEY_HOOKS_ENABLED, enabled);
@@ -257,6 +269,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   // from the first tick after a server restart.
   if (runtime) {
     runtime.watchAllSessions.current = watchAllSessions;
+    runtime.watchCoworkSessions.current = watchCoworkSessions;
     runtime.hooksEnabled.current = hooksEnabled;
   }
 
