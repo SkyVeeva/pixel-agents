@@ -59,6 +59,7 @@ CI green on this suite is the safety net for behavioral regressions. The checks 
 - Spawn 3+ agents — matrix spawn animation renders cleanly, characters move smoothly between seats.
 - Open the Layout editor — paint floor with HSBC sliders, place + rotate (R) furniture, toggle on/off (T) state, drag-to-move in SELECT, multi-stage Esc unwinds correctly.
 - Hover and click characters — overlay text positioning is correct, selection outline crisp, click on a seat reassigns.
+- Leave an agent idle after a turn — it steps ≥3 tiles from its desk and mills there (doesn't sit back down); a persistent bubble sits above any agent awaiting your input; it walks back to its seat when it goes active again.
 
 **Real Claude Code integration** (mock-claude is a fixture; real Claude's JSONL has edge cases the mock doesn't):
 
