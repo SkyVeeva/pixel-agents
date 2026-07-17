@@ -43,6 +43,7 @@ import {
   PetState,
   TILE_SIZE,
 } from '../types.js';
+import { isPersistentWaitingBubble } from './bubbleBehavior.js';
 import { createCharacter, updateCharacter } from './characters.js';
 import { matrixEffectSeeds } from './matrixEffect.js';
 import { createPet, updatePet } from './petEntity.js';
@@ -1020,8 +1021,13 @@ export class OfficeState {
         updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles),
       );
 
-      // Tick bubble timer for waiting bubbles
-      if (ch.bubbleType === 'waiting') {
+      // Tick the timer only for the transient "Done" waiting bubble. The
+      // awaiting-input bubble is persistent — it stays until the agent goes
+      // active again (which nulls bubbleType elsewhere).
+      if (
+        ch.bubbleType === 'waiting' &&
+        !isPersistentWaitingBubble(ch.bubbleType, ch.waitingAwaitingInput)
+      ) {
         ch.bubbleTimer -= dt;
         if (ch.bubbleTimer <= 0) {
           ch.bubbleType = null;

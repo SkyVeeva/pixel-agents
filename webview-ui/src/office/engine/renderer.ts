@@ -69,6 +69,7 @@ import type {
 } from '../types.js';
 import { CharacterState, TILE_SIZE, TileType } from '../types.js';
 import { getWallInstances, hasWallSprites, wallColorToHex } from '../wallTiles.js';
+import { isPersistentWaitingBubble } from './bubbleBehavior.js';
 import { getCharacterSprite } from './characters.js';
 import { renderMatrixEffect } from './matrixEffect.js';
 import { getPetSpriteData } from './petEntity.js';
@@ -738,17 +739,19 @@ function renderBubbles(
 ): void {
   for (const ch of characters) {
     if (!ch.bubbleType) continue;
-    // The green checkmark bubble only represents "done" (turn finished). The
-    // idle "Waiting for input" state communicates via its overlay label, not a
-    // bubble, so skip the bubble for it.
-    if (ch.bubbleType === 'waiting' && ch.waitingAwaitingInput) continue;
 
     const sprite =
       ch.bubbleType === 'permission' ? BUBBLE_PERMISSION_SPRITE : BUBBLE_WAITING_SPRITE;
 
-    // Compute opacity: permission = full, waiting = fade in last 0.5s
+    // Opacity: permission and the awaiting-input waiting bubble render at full
+    // alpha (persistent). Only the transient "Done" waiting bubble fades out in
+    // its last BUBBLE_FADE_DURATION_SEC.
     let alpha = 1.0;
-    if (ch.bubbleType === 'waiting' && ch.bubbleTimer < BUBBLE_FADE_DURATION_SEC) {
+    if (
+      ch.bubbleType === 'waiting' &&
+      !isPersistentWaitingBubble(ch.bubbleType, ch.waitingAwaitingInput) &&
+      ch.bubbleTimer < BUBBLE_FADE_DURATION_SEC
+    ) {
       alpha = ch.bubbleTimer / BUBBLE_FADE_DURATION_SEC;
     }
 
