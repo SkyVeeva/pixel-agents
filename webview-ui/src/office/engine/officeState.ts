@@ -47,6 +47,7 @@ import { isPersistentWaitingBubble } from './bubbleBehavior.js';
 import { createCharacter, updateCharacter } from './characters.js';
 import { matrixEffectSeeds } from './matrixEffect.js';
 import { createPet, updatePet } from './petEntity.js';
+import { closestFreeSeat, subagentFallbackTile } from './subagentPlacement.js';
 
 /** Internal helper: facing-tile coords for a seat. Returns null for invalid direction. */
 function seatFacingOffset(direction: Direction): { dCol: number; dRow: number } {
@@ -580,39 +581,41 @@ export class OfficeState {
     const palette = parentCh ? parentCh.palette : 0;
     const hueShift = parentCh ? parentCh.hueShift : 0;
 
-    // Find the closest walkable tile to the parent, avoiding tiles occupied by other characters
     const parentCol = parentCh ? parentCh.tileCol : 0;
     const parentRow = parentCh ? parentCh.tileRow : 0;
-    const dist = (c: number, r: number) => Math.abs(c - parentCol) + Math.abs(r - parentRow);
+    const parentDir = parentCh ? parentCh.dir : Direction.DOWN;
 
-    // Build set of tiles occupied by existing characters
-    const occupiedTiles = new Set<string>();
-    for (const [, other] of this.characters) {
-      occupiedTiles.add(`${other.tileCol},${other.tileRow}`);
-    }
-
-    let spawn = { col: parentCol, row: parentRow };
-    if (this.walkableTiles.length > 0) {
-      let closest = this.walkableTiles[0];
-      let closestDist = Infinity;
-      for (const tile of this.walkableTiles) {
-        if (occupiedTiles.has(`${tile.col},${tile.row}`)) continue;
-        const d = dist(tile.col, tile.row);
-        if (d < closestDist) {
-          closest = tile;
-          closestDist = d;
-        }
+    // A working agent belongs at a computer: seat the sub-agent at the free seat
+    // closest to its parent (the FSM then walks it there and sits it). Only when
+    // the office is full does it stand behind/next to the parent instead.
+    let ch: Character;
+    const seatId = closestFreeSeat(parentCol, parentRow, this.seats);
+    if (seatId) {
+      const seat = this.seats.get(seatId)!;
+      seat.assigned = true;
+      ch = createCharacter(id, palette, seatId, seat, hueShift);
+    } else {
+      // Build set of tiles occupied by existing characters
+      const occupiedTiles = new Set<string>();
+      for (const [, other] of this.characters) {
+        occupiedTiles.add(`${other.tileCol},${other.tileRow}`);
       }
-      spawn = closest;
+      const tile = subagentFallbackTile(
+        parentCol,
+        parentRow,
+        parentDir,
+        this.walkableTiles,
+        occupiedTiles,
+      );
+      ch = createCharacter(id, palette, null, null, hueShift);
+      ch.tileCol = tile.col;
+      ch.tileRow = tile.row;
+      ch.x = tile.col * TILE_SIZE + TILE_SIZE / 2;
+      ch.y = tile.row * TILE_SIZE + TILE_SIZE / 2;
+      // Face the same direction as the parent agent
+      if (parentCh) ch.dir = parentCh.dir;
     }
 
-    const ch = createCharacter(id, palette, null, null, hueShift);
-    ch.x = spawn.col * TILE_SIZE + TILE_SIZE / 2;
-    ch.y = spawn.row * TILE_SIZE + TILE_SIZE / 2;
-    ch.tileCol = spawn.col;
-    ch.tileRow = spawn.row;
-    // Face the same direction as the parent agent
-    if (parentCh) ch.dir = parentCh.dir;
     ch.isSubagent = true;
     ch.parentAgentId = parentAgentId;
     ch.matrixEffect = 'spawn';
