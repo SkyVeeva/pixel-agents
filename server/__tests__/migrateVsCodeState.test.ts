@@ -10,7 +10,19 @@ vi.mock('vscode', () => ({
   window: { showWarningMessage },
 }));
 
+// Mock os.homedir() for cross-platform temp-home isolation. Overriding
+// process.env.HOME is not portable: os.homedir() reads USERPROFILE on Windows.
+// `tempHome` is the temp dir we always clean up; `homeOverride` is what
+// homedir() returns (usually tempHome, but a bogus path in the write-failure test).
+let tempHome: string;
+let homeOverride: string;
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os');
+  return { ...actual, homedir: () => homeOverride };
+});
+
 import { migrateVsCodeState } from '../../adapters/vscode/migrateVsCodeState.js';
+import { getHooksEnabled } from '../src/configPersistence.js';
 import { FileStateAdapter } from '../src/fileStateAdapter.js';
 import { readLayoutFromFile, writeLayoutToFile } from '../src/layoutPersistence.js';
 
@@ -50,23 +62,17 @@ function makeContext(globalSeed = {}, workspaceSeed = {}) {
 }
 
 describe('migrateVsCodeState', () => {
-  let tempHome: string;
-  let originalHome: string | undefined;
-
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-migrate-test-'));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
+    homeOverride = tempHome;
     showWarningMessage.mockReset();
   });
 
   afterEach(() => {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
-  it('migrates all 6 legacy globalState settings to the vscode namespace and clears them', () => {
+  it('migrates every legacy globalState setting — and DISCARDS the hooks preference', () => {
     const { context, globalStore } = makeContext({
       'pixel-agents.soundEnabled': false,
       'pixel-agents.lastSeenVersion': '1.2.0',
@@ -83,8 +89,14 @@ describe('migrateVsCodeState', () => {
     expect(adapter.getSetting('pixel-agents.lastSeenVersion', '')).toBe('1.2.0');
     expect(adapter.getSetting('pixel-agents.alwaysShowLabels', false)).toBe(true);
     expect(adapter.getSetting('pixel-agents.watchAllSessions', false)).toBe(true);
-    expect(adapter.getSetting('pixel-agents.hooksEnabled', true)).toBe(false);
+    // The legacy hooksEnabled is DISCARDED, not migrated: hooks were on by
+    // default back then, so a stored value means the user turned them OFF
+    // without ever being told what they add — they get the Intro instead. The
+    // provider map keeps its default...
+    expect(getHooksEnabled('claude')).toBe(true);
     expect(adapter.getSetting('pixel-agents.hooksInfoShown', false)).toBe(true);
+    // ...while the stale key is still cleared — left behind it would count as
+    // unmigrated forever and warn on every launch.
     expect(globalStore).toEqual({});
     expect(showWarningMessage).not.toHaveBeenCalled();
   });
@@ -172,7 +184,7 @@ describe('migrateVsCodeState', () => {
     // Simulate by replacing with a file (so mkdirSync fails on subpath).
     const blocker = path.join(tempHome, 'blocker');
     fs.writeFileSync(blocker, 'x');
-    process.env.HOME = blocker; // HOME is now a file; can't mkdir inside
+    homeOverride = blocker; // home is now a file; can't mkdir inside
 
     const { context, globalStore } = makeContext({
       'pixel-agents.soundEnabled': false,

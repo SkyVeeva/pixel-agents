@@ -31,6 +31,7 @@ import {
   GHOST_PREVIEW_TINT_ALPHA,
   GHOST_VALID_TINT,
   GRID_LINE_COLOR,
+  HEADLESS_CHARACTER_ALPHA,
   HOVERED_OUTLINE_ALPHA,
   OUTLINE_Z_SORT_OFFSET,
   ROTATE_BUTTON_BG,
@@ -44,6 +45,7 @@ import {
   VOID_TILE_OUTLINE_COLOR,
 } from '../../constants.js';
 import { getColorizedFloorSprite, hasFloorSprites, WALL_COLOR } from '../floorTiles.js';
+import { mapOffset } from '../projection.js';
 import {
   getCarpetJunctionSprite,
   getCarpetPaletteKey,
@@ -73,6 +75,26 @@ import { isPersistentWaitingBubble } from './bubbleBehavior.js';
 import { getCharacterSprite } from './characters.js';
 import { renderMatrixEffect } from './matrixEffect.js';
 import { getPetSpriteData } from './petEntity.js';
+
+// ── Settings ────────────────────────────────────────────────────
+
+/**
+ * "Display headless as ghosts" — whether headless agents render translucent.
+ * Module state rather than a render param: the rAF loop reads it every frame,
+ * so a toggle takes effect on the next one without threading a 21st argument
+ * through renderFrame. Same shape as setProviderCapabilities / setSoundEnabled.
+ * Mirrors the server default (off) — the cue is opt-in, so an office looks the
+ * same as it did before the setting existed until someone turns it on.
+ */
+let ghostHeadlessAgents = false;
+
+export function setGhostHeadlessAgents(enabled: boolean): void {
+  ghostHeadlessAgents = enabled;
+}
+
+export function isGhostHeadlessAgentsEnabled(): boolean {
+  return ghostHeadlessAgents;
+}
 
 // ── Render functions ────────────────────────────────────────────
 
@@ -382,6 +404,10 @@ export function renderScene(
     // at lower rows (e.g. desks, bookshelves that occlude from below).
     const charZY = ch.y + TILE_SIZE / 2 + CHARACTER_Z_SORT_OFFSET;
 
+    // Headless agents (adopted, no terminal to focus) render translucent while
+    // the "Display headless as ghosts" setting is on.
+    const alpha = ch.isHeadless && ghostHeadlessAgents ? HEADLESS_CHARACTER_ALPHA : 1;
+
     // Matrix spawn/despawn effect — skip outline, use per-pixel rendering
     if (ch.matrixEffect) {
       const mDrawX = drawX;
@@ -391,7 +417,10 @@ export function renderScene(
       drawables.push({
         zY: charZY,
         draw: (c) => {
+          c.save();
+          c.globalAlpha = alpha;
           renderMatrixEffect(c, mCh, mSpriteData, mDrawX, mDrawY, zoom);
+          c.restore();
         },
       });
       continue;
@@ -420,7 +449,14 @@ export function renderScene(
     drawables.push({
       zY: charZY,
       draw: (c) => {
+        if (alpha === 1) {
+          c.drawImage(cached, drawX, drawY);
+          return;
+        }
+        c.save();
+        c.globalAlpha = alpha;
         c.drawImage(cached, drawX, drawY);
+        c.restore();
       },
     });
   }
@@ -878,11 +914,9 @@ export function renderFrame(
   const cols = layoutCols ?? (tileMap.length > 0 ? tileMap[0].length : 0);
   const rows = layoutRows ?? tileMap.length;
 
-  // Center map in viewport + pan offset (integer device pixels)
-  const mapW = cols * TILE_SIZE * zoom;
-  const mapH = rows * TILE_SIZE * zoom;
-  const offsetX = Math.floor((canvasWidth - mapW) / 2) + Math.round(panX);
-  const offsetY = Math.floor((canvasHeight - mapH) / 2) + Math.round(panY);
+  // Center map in viewport + pan offset (integer device pixels). Shared with
+  // the DOM overlays so a label lands exactly on the sprite it belongs to.
+  const { offsetX, offsetY } = mapOffset(canvasWidth, canvasHeight, cols, rows, zoom, panX, panY);
 
   // Draw tiles (floor + wall base color)
   renderTileGrid(ctx, tileMap, offsetX, offsetY, zoom, tileColors, layoutCols);

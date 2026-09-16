@@ -1,4 +1,5 @@
 import {
+  DEFAULT_MAX_CONTEXT_TOKENS,
   IDLE_MIN_DISTANCE_FROM_SEAT_TILES,
   SEAT_REST_MAX_SEC,
   SEAT_REST_MIN_SEC,
@@ -85,8 +86,8 @@ export function createCharacter(
     matrixEffect: null,
     matrixEffectTimer: 0,
     matrixEffectSeeds: [],
-    inputTokens: 0,
-    outputTokens: 0,
+    contextTokens: 0,
+    maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   };
 }
 

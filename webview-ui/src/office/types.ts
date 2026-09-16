@@ -223,6 +223,16 @@ export interface Character {
   matrixEffectSeeds: number[];
   /** Workspace folder name (only set for multi-root workspaces) */
   folderName?: string;
+  /** Headless agent: adopted from outside the office, so there is no terminal to
+   *  focus. Rendered translucent. Teammates and sub-agents are never headless —
+   *  clicking them reaches their lead's / parent's terminal. */
+  isHeadless?: boolean;
+  /** The first-run consent greeter. A MARKER, not a gate: the greeter lives in
+   *  OfficeState.greeter, outside the agent map, so seat assignment, palette
+   *  diversity, the FSM, hit-testing and seat persistence never see it — no
+   *  per-consumer guard reads this flag. It exists for the render/e2e snapshot
+   *  (testHooks.getCharacters) to tell the greeter from agents. */
+  isGreeter?: boolean;
 
   // -- Session metadata (Claude.app sidecars) --
   /** Human-readable session title, when known. Preferred over folderName for the label. */
@@ -241,10 +251,13 @@ export interface Character {
   leadAgentId?: number;
   /** True when lead spawns teammates via tmux (run_in_background Agent calls) */
   teamUsesTmux?: boolean;
-  /** Cumulative input tokens consumed */
-  inputTokens: number;
-  /** Cumulative output tokens consumed */
-  outputTokens: number;
+
+  // -- Context gauge --
+  /** Tokens in the agent's context as of its newest turn; 0 until reported.
+   *  Sub-agents have no session of their own and stay at 0. */
+  contextTokens: number;
+  /** Window `contextTokens` is measured against. */
+  maxContextTokens: number;
 }
 
 export const PetState = { IDLE: 'idle', WALK: 'walk', FOLLOW: 'follow' } as const;

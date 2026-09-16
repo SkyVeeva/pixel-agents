@@ -16,8 +16,18 @@ import {
   spawnExternalClaudeScenario,
   waitForClaudeHookSetup,
 } from '../../../helpers/mock-claude';
-import { expectOverlayCount, expectOverlayVisible } from '../../../helpers/office';
-import { buildAssistantToolUseRecord, buildUserToolResultRecord } from '../../../helpers/team';
+import {
+  expectCharacterGhosted,
+  expectContextGauge,
+  expectOverlayCount,
+  expectOverlayVisible,
+  getContextGauges,
+} from '../../../helpers/office';
+import {
+  buildAssistantToolUseRecord,
+  buildAssistantUsageRecord,
+  buildUserToolResultRecord,
+} from '../../../helpers/team';
 import { getPixelAgentsFrame, openPixelAgentsPanel, setSettings } from '../../../helpers/webview';
 
 test.describe('Hooks ON / spawn paths', () => {
@@ -25,6 +35,12 @@ test.describe('Hooks ON / spawn paths', () => {
     pixelAgents,
   }) => {
     const { frame, window, tmpHome, mockLogFile, narrator } = pixelAgents;
+
+    // Ghosting ships off, so turn it on before anything spawns. That makes the
+    // "not a ghost" assertion below say something — that this agent owns a
+    // terminal — rather than merely restating the default.
+    narrator.step('enabling "Display Headless as Ghosts" so the opacity cue is live');
+    await setSettings(frame, { ghostHeadlessAgents: true });
 
     // Sub-character appears on Task tool_use and despawns on tool_result.
     // Task subagent lifecycle is JSONL-driven even in hooks-on mode
@@ -43,6 +59,8 @@ test.describe('Hooks ON / spawn paths', () => {
             description: 'spawned subtask',
           }),
         )
+        .at(7_000)
+        .appendJsonl(buildAssistantUsageRecord(90_000))
         .at(13_000)
         .appendJsonl(buildUserToolResultRecord('toolu-subagent-spawn'))
         .holdOpenFor(15_000)
@@ -64,10 +82,23 @@ test.describe('Hooks ON / spawn paths', () => {
     await expect(terminalTab.first()).toBeVisible({ timeout: 15_000 });
     narrator.check('a real "Claude Code #N" terminal tab is open');
 
+    // The terminal above is exactly what makes this agent NOT headless: it has
+    // one to focus, so it renders fully opaque (contrast: the adopted external
+    // session in the next test).
+    await expectCharacterGhosted(panelFrame, false);
+
     narrator.step('waiting for the t+5s Task tool_use to spawn a "Subtask" character');
     await expectOverlayCount(panelFrame, 2);
     await expectOverlayVisible(panelFrame, 'Subtask: spawned subtask');
     narrator.check('"Subtask: spawned subtask" overlay up — count 1 → 2');
+
+    // The agent is on no team, so this also pins that the context gauge is not
+    // a teams feature. 90k of an Opus 5 window is 9%; reading 45% would mean
+    // the runtime fell back to assuming a 200k window.
+    narrator.step("waiting for the t+7s usage record to fill the agent's context gauge");
+    await expectContextGauge(panelFrame, 9);
+    await expect(getContextGauges(panelFrame)).toHaveCount(1);
+    narrator.check('the agent shows a 9% context gauge; the subtask has none');
 
     narrator.step('waiting for the t+13s tool_result — the subtask should despawn');
     await expectOverlayCount(panelFrame, 1);
@@ -91,9 +122,13 @@ test.describe('Hooks ON / spawn paths', () => {
   }) => {
     const { frame, tmpHome, workspaceDir, mockLogFile, narrator } = pixelAgents;
 
-    narrator.step('enabling Watch All Sessions so the hooks-only session gets adopted');
+    // Ghosting ships off, so the test turns it on — otherwise the adopted agent
+    // below is headless but drawn at full opacity, which is the correct default
+    // behaviour and would make the ghost assertion unreachable.
+    narrator.step('enabling Watch All Sessions + ghosting so the hooks-only session gets adopted');
     await setSettings(frame, {
       watchAllSessions: true,
+      ghostHeadlessAgents: true,
     });
 
     narrator.step('waiting for the hook install and hook server to be ready');
@@ -138,6 +173,10 @@ test.describe('Hooks ON / spawn paths', () => {
     await expectOverlayCount(frame, 1);
     await expectOverlayVisible(frame, 'Running: npm test');
     narrator.check('the external agent appeared — "Running: npm test"');
+
+    // Adopted from outside via Watch All Sessions: no terminal to focus, so the
+    // character is headless and renders translucent.
+    await expectCharacterGhosted(frame, true);
 
     // 2. PermissionRequest (t+4.5s) → "Needs approval"
     narrator.step('waiting for the t+4.5s PermissionRequest');

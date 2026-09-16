@@ -15,18 +15,21 @@ import * as path from 'path';
 import type { HookProvider } from '../../core/src/provider.js';
 import type { SessionInfo } from '../../core/src/sessionIndexProvider.js';
 import type { AgentStateStore } from './agentStateStore.js';
-import { SESSION_INDEX_POLL_INTERVAL_MS } from './constants.js';
+import { DEFAULT_MAX_CONTEXT_TOKENS, SESSION_INDEX_POLL_INTERVAL_MS } from './constants.js';
 import { DismissalTracker } from './dismissalTracker.js';
 import {
   adoptExternalSessionFromHook,
   ensureProjectScan,
   isTrackedProjectDir,
   reassignAgentToFile,
+  scanForBackgroundAgentFiles,
   scanForTeammateFiles,
   setAgentRemovalCallback,
   setDismissalTracker,
   setHookProvider as setFileWatcherHookProvider,
   setSessionInfoResolver,
+  setSubagentWatch,
+  setTeammateRegisterCallback,
   setTeammateRemovalCallback,
   setTeamProvider,
   startExternalSessionScanning,
@@ -35,9 +38,17 @@ import {
 } from './fileWatcher.js';
 import type { HookEvent } from './hookEventHandler.js';
 import { HookEventHandler } from './hookEventHandler.js';
+import { assignPaletteIfNeeded } from './paletteAssigner.js';
+import { PathSet, pathsMatch } from './pathKey.js';
 import { SessionRouter } from './sessionRouter.js';
+import { SubagentWatch } from './subagentWatch.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
-import { setHookProvider } from './transcriptParser.js';
+import {
+  setBackgroundAgentCompletedCallback,
+  setBackgroundAgentDetectedCallback,
+  setHookProvider,
+  setTeamSwitchCallback,
+} from './transcriptParser.js';
 import type { AgentState } from './types.js';
 
 /** Callbacks that adapters register for platform-specific behavior. */
@@ -56,8 +67,10 @@ export class AgentRuntime {
   readonly permissionTimers = new Map<number, ReturnType<typeof setTimeout>>();
   readonly jsonlPollTimers = new Map<number, ReturnType<typeof setInterval>>();
 
-  // Scanning state
-  readonly knownJsonlFiles = new Set<string>();
+  // Scanning state. PathSet (not Set) so a transcript adopted via hooks is still
+  // recognized as known when a scanner rebuilds the path from the workspace folder
+  // -- the two spellings differ by drive-letter case on Windows.
+  readonly knownJsonlFiles = new PathSet();
   readonly projectScanTimer = { current: null as ReturnType<typeof setInterval> | null };
   readonly activeAgentId = { current: null as number | null };
   private externalScanTimer: ReturnType<typeof setInterval> | null = null;
@@ -77,6 +90,8 @@ export class AgentRuntime {
 
   // Dependencies
   readonly dismissalTracker = new DismissalTracker();
+  /** Shadow-store watcher for unnamed background spawns (sub-agents). */
+  readonly subagentWatch: SubagentWatch;
   private hookEventHandler: HookEventHandler;
   private lifecycleCallbacks: RuntimeLifecycleCallbacks = {};
 
@@ -89,6 +104,8 @@ export class AgentRuntime {
     setDismissalTracker(this.dismissalTracker);
     setHookProvider(provider);
     setFileWatcherHookProvider(provider);
+    this.subagentWatch = new SubagentWatch(store);
+    setSubagentWatch(this.subagentWatch);
     if (provider.team) {
       setTeamProvider(provider.team);
     }
@@ -99,6 +116,47 @@ export class AgentRuntime {
     }
     setAgentRemovalCallback((id) => this.removeAgent(id));
     setTeammateRemovalCallback((id) => this.removeTeammate(id, 'team-config'));
+    // New-style teammates run their own sessions; registering routes their hook
+    // events (PreToolUse, Stop, SessionEnd) directly to the teammate agent.
+    setTeammateRegisterCallback((sessionId, agentId) => this.registerAgent(sessionId, agentId));
+    // Background spawns (teams OFF): classify by sidecar name on spawn (named
+    // -> teammate character, unnamed -> shadow-watched sub-agent), remove when
+    // the completion queue-operation lands on the lead.
+    setBackgroundAgentDetectedCallback((leadId) => {
+      scanForBackgroundAgentFiles(
+        leadId,
+        this.store,
+        this.store.nextAgentId,
+        this.fileWatchers,
+        this.pollingTimers,
+        this.waitingTimers,
+        this.permissionTimers,
+        () => this.store.persist(),
+        undefined,
+      );
+    });
+    setBackgroundAgentCompletedCallback((leadId, toolUseId) => {
+      for (const [id, agent] of this.store) {
+        if (agent.leadAgentId === leadId && agent.spawnToolUseId === toolUseId) {
+          this.removeTeammate(id, 'background-complete');
+          break;
+        }
+      }
+      // Unnamed spawns live in the shadow store; the webview sub-character is
+      // cleared by the lead-side queue-op subagentClear, not by this call.
+      this.subagentWatch.removeBySpawn(leadId, toolUseId);
+    });
+    // A resumed lead that spawns again belongs to a freshly minted implicit
+    // team; its previous team's teammates are defunct. Promoted anonymous
+    // background agents (leadAgentId but no teamName) are left untouched.
+    setTeamSwitchCallback((leadId, previousTeamName) => {
+      const stale = [...this.store].filter(
+        ([, a]) => a.leadAgentId === leadId && a.teamName === previousTeamName,
+      );
+      for (const [id] of stale) {
+        this.removeTeammate(id, 'team-switch');
+      }
+    });
 
     this.hookEventHandler = new HookEventHandler(
       store,
@@ -113,7 +171,48 @@ export class AgentRuntime {
     this.hookEventHandler.setLifecycleCallbacks({
       onExternalSessionDetected: (sessionId, transcriptPath, cwd) => {
         const projectDir = transcriptPath ? path.dirname(transcriptPath) : cwd;
+        // Teammate session of a tracked lead? Attach it as a teammate character
+        // instead of adopting a generic external agent -- and regardless of the
+        // Watch All Sessions setting: tracking the lead is the opt-in for its
+        // team. (Newer harnesses run every spawned agent as an independent
+        // top-level session that fires its own hooks.)
+        if (transcriptPath) {
+          const teamMeta = provider.team?.getTeamMetadataForSession(transcriptPath);
+          if (teamMeta?.teamName && teamMeta.agentName) {
+            for (const [leadId, lead] of this.store) {
+              if (lead.teamName !== teamMeta.teamName || lead.leadAgentId !== undefined) continue;
+              console.log(
+                `[Pixel Agents] Hook: session ${sessionId.slice(0, 8)}... is teammate "${teamMeta.agentName}" of Agent ${leadId}, attaching`,
+              );
+              scanForTeammateFiles(
+                lead.projectDir,
+                lead.sessionId,
+                leadId,
+                this.store.nextAgentId,
+                this.store,
+                this.fileWatchers,
+                this.pollingTimers,
+                this.waitingTimers,
+                this.permissionTimers,
+                () => this.store.persist(),
+                undefined,
+              );
+              break;
+            }
+            // Done only if discovery actually adopted this transcript. Old-style
+            // tmux teammates (non-UUID transcript names outside discovery's scan)
+            // fall through to normal external adoption and self-identify from
+            // their record tags.
+            for (const a of this.store.values()) {
+              if (pathsMatch(a.jsonlFile, transcriptPath)) return;
+            }
+          }
+        }
         if (!isTrackedProjectDir(projectDir) && !this.watchAllSessions.current) {
+          console.log(
+            `[Pixel Agents] Hook: external session ${sessionId.slice(0, 8)}... not adopted ` +
+              `(project untracked, Watch All Sessions off)`,
+          );
           return;
         }
         adoptExternalSessionFromHook(
@@ -184,9 +283,11 @@ export class AgentRuntime {
         if (!agent) return;
         this.dismissalTracker.clearSeededMtime(agent.jsonlFile);
         this.dismissalTracker.dismiss(agent.jsonlFile);
-        if (agent.isTeamLead) {
-          this.removeTeammates(agentId);
-        }
+        // Covers real team leads AND leads of background teammates (which
+        // have children but no teamName). No-op when childless.
+        this.removeTeammates(agentId);
+        // Unnamed background spawns die with their lead's session too.
+        this.subagentWatch.removeByLead(agentId);
         if (agent.isExternal) {
           this.unregisterAgent(agent.sessionId);
           this.removeAgent(agentId);
@@ -258,9 +359,37 @@ export class AgentRuntime {
     if (!agent) return;
     console.log(`[Pixel Agents] Removing teammate ${teammateId} (source: ${source})`);
     this.dismissalTracker.dismiss(agent.jsonlFile);
-    this.unregisterAgent(agent.sessionId);
+    // Background teammates (spawnToolUseId set) share the LEAD's session id;
+    // unregistering it would knock the lead itself out of the session router.
+    if (!agent.spawnToolUseId) {
+      this.unregisterAgent(agent.sessionId);
+    }
     this.lifecycleCallbacks.onTeammateRemoved?.(teammateId, agent, source);
     this.removeAgent(teammateId);
+    if (agent.leadAgentId !== undefined) {
+      this.demoteLeadIfTeamEmpty(agent.leadAgentId);
+    }
+  }
+
+  /** Drop the LEAD badge when the last teammate leaves. teamName is kept: it
+   *  still routes discovery of late-arriving teammates of the same generation
+   *  (and linkTeammates / the derived-team path re-badge on the next spawn). */
+  private demoteLeadIfTeamEmpty(leadId: number): void {
+    const lead = this.store.get(leadId);
+    if (!lead || !lead.isTeamLead) return;
+    for (const a of this.store.values()) {
+      if (a.leadAgentId === leadId) return;
+    }
+    lead.isTeamLead = undefined;
+    this.store.broadcast({
+      type: 'agentTeamInfo',
+      id: leadId,
+      teamName: lead.teamName,
+      agentName: lead.agentName,
+      isTeamLead: undefined,
+      leadAgentId: lead.leadAgentId,
+    });
+    this.store.persist();
   }
 
   /** Remove all teammates of a lead agent. */
@@ -276,7 +405,9 @@ export class AgentRuntime {
       if (agent) {
         console.log(`[Pixel Agents] Removing teammate ${id} (lead ${leadId} closed)`);
         this.dismissalTracker.dismiss(agent.jsonlFile);
-        this.unregisterAgent(agent.sessionId);
+        if (!agent.spawnToolUseId) {
+          this.unregisterAgent(agent.sessionId);
+        }
         this.removeAgent(id);
       }
     }
@@ -447,6 +578,11 @@ export class AgentRuntime {
 
     for (const p of persisted) {
       if (!p.isExternal) continue;
+      // Background-spawn children (a leadAgentId but no teamName) are derived
+      // state: the 1s scan re-materializes them from sidecars while their spawn
+      // is live. Restoring them directly would resurrect immortal characters
+      // (also skips stale entries written by older builds that persisted them).
+      if (p.leadAgentId !== undefined && !p.teamName) continue;
       try {
         if (!fs.existsSync(p.jsonlFile)) continue;
       } catch {
@@ -472,7 +608,9 @@ export class AgentRuntime {
         activeToolNames: new Map(),
         activeSubagentToolIds: new Map(),
         activeSubagentToolNames: new Map(),
-        backgroundAgentToolIds: new Set(),
+        // Live spawn ids survive the restart so the 1s scan can re-adopt the
+        // spawns' transcripts and the completion queue-op still matches.
+        backgroundAgentToolIds: new Set(p.backgroundAgentToolIds ?? []),
         isWaiting: false,
         permissionSent: false,
         hadToolsInTurn: false,
@@ -483,15 +621,18 @@ export class AgentRuntime {
         sessionTitle: p.sessionTitle,
         surface: p.surface,
         hookDelivered: false,
-        inputTokens: 0,
-        outputTokens: 0,
+        contextTokens: 0,
+        maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
         teamName: p.teamName,
         agentName: p.agentName,
         isTeamLead: p.isTeamLead,
         leadAgentId: p.leadAgentId,
         teamUsesTmux: p.teamUsesTmux,
+        palette: p.palette,
+        hueShift: p.hueShift,
       };
 
+      assignPaletteIfNeeded(agent, this.store);
       this.store.set(p.id, agent);
       this.knownJsonlFiles.add(p.jsonlFile);
 
@@ -531,6 +672,7 @@ export class AgentRuntime {
   /** Clean up all scanners, timers, and agents. Called on shutdown. */
   dispose(): void {
     this.hookEventHandler.dispose();
+    this.subagentWatch.dispose();
 
     if (this.projectScanTimer.current) {
       clearInterval(this.projectScanTimer.current);

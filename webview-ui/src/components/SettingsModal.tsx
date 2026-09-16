@@ -15,12 +15,19 @@ interface SettingsModalProps {
   onToggleDebugMode: () => void;
   alwaysShowOverlay: boolean;
   onToggleAlwaysShowOverlay: () => void;
+  /** Whether headless agents (adopted, no terminal to focus) render translucent. */
+  ghostHeadlessAgents: boolean;
+  onToggleGhostHeadlessAgents: () => void;
   externalAssetDirectories: string[];
   watchAllSessions: boolean;
   onToggleWatchAllSessions: () => void;
   watchCoworkSessions: boolean;
   onToggleWatchCoworkSessions: () => void;
-  hooksEnabled: boolean;
+  /** ACTUAL install state (the hooksStatus message), not the hooksEnabled
+   *  preference. The preference defaults to true while first-run consent is
+   *  still pending, so binding the checkbox to it renders "on" over an empty
+   *  ~/.claude/settings.json. */
+  hooksInstalled: boolean;
   onToggleHooksEnabled: () => void;
   /** Whether the areas overlay is rendered outside of the Areas edit tool. */
   showAreas: boolean;
@@ -40,12 +47,14 @@ export function SettingsModal({
   onToggleDebugMode,
   alwaysShowOverlay,
   onToggleAlwaysShowOverlay,
+  ghostHeadlessAgents,
+  onToggleGhostHeadlessAgents,
   externalAssetDirectories,
   watchAllSessions,
   onToggleWatchAllSessions,
   watchCoworkSessions,
   onToggleWatchCoworkSessions,
-  hooksEnabled,
+  hooksInstalled,
   onToggleHooksEnabled,
   showAreas,
   onToggleShowAreas,
@@ -186,7 +195,7 @@ export function SettingsModal({
       />
       <Checkbox
         label="Instant Detection (Hooks)"
-        checked={hooksEnabled}
+        checked={hooksInstalled}
         onChange={onToggleHooksEnabled}
       />
       <Checkbox
@@ -194,6 +203,15 @@ export function SettingsModal({
         checked={alwaysShowOverlay}
         onChange={onToggleAlwaysShowOverlay}
       />
+      {/* Headless agents are the office's only terminal-less citizens in VS Code.
+          Standalone has no terminals at all, so nothing there would ever ghost. */}
+      {!isBrowserRuntime && (
+        <Checkbox
+          label="Display Headless as Ghosts"
+          checked={ghostHeadlessAgents}
+          onChange={onToggleGhostHeadlessAgents}
+        />
+      )}
       {showAreasAvailable && (
         <Checkbox label="Show Areas" checked={showAreas} onChange={onToggleShowAreas} />
       )}

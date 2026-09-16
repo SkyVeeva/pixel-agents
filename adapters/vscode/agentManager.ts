@@ -4,8 +4,9 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import type { StateAdapter } from '../../core/src/adapter.js';
+import { resendAgentActivity } from '../../server/src/agentActivityResend.js';
 import { AgentStateStore } from '../../server/src/agentStateStore.js';
-import { JSONL_POLL_INTERVAL_MS } from '../../server/src/constants.js';
+import { DEFAULT_MAX_CONTEXT_TOKENS, JSONL_POLL_INTERVAL_MS } from '../../server/src/constants.js';
 import {
   ensureProjectScan,
   readNewLines,
@@ -13,6 +14,7 @@ import {
   startFileWatching,
 } from '../../server/src/fileWatcher.js';
 import { loadLayout } from '../../server/src/layoutPersistence.js';
+import { assignPaletteIfNeeded } from '../../server/src/paletteAssigner.js';
 import { CLAUDE_TERMINAL_NAME_PREFIX } from '../../server/src/providers/hook/claude/constants.js';
 import { claudeProvider } from '../../server/src/providers/index.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from '../../server/src/timerManager.js';
@@ -115,10 +117,11 @@ export async function launchNewTerminal(
     seenUnknownRecordTypes: new Set(),
     folderName,
     hookDelivered: false,
-    inputTokens: 0,
-    outputTokens: 0,
+    contextTokens: 0,
+    maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   };
 
+  assignPaletteIfNeeded(agent, agents);
   agents.set(id, agent);
   activeAgentIdRef.current = id;
   persistAgents();
@@ -262,9 +265,20 @@ export function removeAgent(
   store.persist();
 }
 
+/**
+ * Reference implementation of the AgentState → PersistedAgent projection: it shows
+ * exactly which fields survive a reload. Kept as the worked example for adapters that
+ * persist through a StateAdapter directly; AgentStateStore.persist() is what the
+ * VS Code surface calls at runtime.
+ *
+ * @public
+ */
 export function persistAgents(agents: AgentStateStore, adapter: StateAdapter): void {
   const persisted: PersistedAgent[] = [];
   for (const agent of agents.values()) {
+    // Background-spawn children are derived state — never persisted (the 1s
+    // scan re-materializes them from sidecars after a restore).
+    if (agent.spawnToolUseId) continue;
     persisted.push({
       id: agent.id,
       sessionId: agent.sessionId,
@@ -278,6 +292,8 @@ export function persistAgents(agents: AgentStateStore, adapter: StateAdapter): v
       isTeamLead: agent.isTeamLead,
       leadAgentId: agent.leadAgentId,
       teamUsesTmux: agent.teamUsesTmux,
+      backgroundAgentToolIds:
+        agent.backgroundAgentToolIds.size > 0 ? [...agent.backgroundAgentToolIds] : undefined,
     });
   }
   adapter.saveAgents(persisted);
@@ -320,6 +336,11 @@ export function restoreAgents(
       continue;
     }
 
+    // Background-spawn children (a leadAgentId but no teamName) are derived
+    // state re-materialized by the 1s scan — never restored directly (also
+    // skips stale entries written by older builds that persisted them).
+    if (p.leadAgentId !== undefined && !p.teamName) continue;
+
     let terminal: vscode.Terminal | undefined;
     const isExternal = p.isExternal ?? false;
 
@@ -350,7 +371,9 @@ export function restoreAgents(
       activeToolNames: new Map(),
       activeSubagentToolIds: new Map(),
       activeSubagentToolNames: new Map(),
-      backgroundAgentToolIds: new Set(),
+      // Live spawn ids survive the reload so the 1s scan can re-adopt the
+      // spawns' transcripts and the completion queue-op still matches.
+      backgroundAgentToolIds: new Set(p.backgroundAgentToolIds ?? []),
       isWaiting: false,
       permissionSent: false,
       hadToolsInTurn: false,
@@ -359,15 +382,20 @@ export function restoreAgents(
       seenUnknownRecordTypes: new Set(),
       folderName: p.folderName,
       hookDelivered: false,
-      inputTokens: 0,
-      outputTokens: 0,
+      contextTokens: 0,
+      maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
       teamName: p.teamName,
       agentName: p.agentName,
-      isTeamLead: p.isTeamLead,
+      // A named agent is a teammate; never restore it as a lead (guards against
+      // state persisted before linkTeammates stopped promoting teammates).
+      isTeamLead: p.agentName ? undefined : p.isTeamLead,
       leadAgentId: p.leadAgentId,
       teamUsesTmux: p.teamUsesTmux,
+      palette: p.palette,
+      hueShift: p.hueShift,
     };
 
+    assignPaletteIfNeeded(agent, store);
     store.set(p.id, agent);
     knownJsonlFiles.add(p.jsonlFile);
     if (isExternal) {
@@ -550,48 +578,7 @@ export function sendCurrentAgentStatuses(
   webview: vscode.Webview | undefined,
 ): void {
   if (!webview) return;
-  for (const [agentId, agent] of agents) {
-    // Re-send active tools
-    for (const [toolId, status] of agent.activeToolStatuses) {
-      const toolName = agent.activeToolNames.get(toolId) ?? '';
-      webview.postMessage({
-        type: 'agentToolStart',
-        id: agentId,
-        toolId,
-        status,
-        toolName,
-      });
-    }
-    // Re-send waiting status
-    if (agent.isWaiting) {
-      webview.postMessage({
-        type: 'agentStatus',
-        id: agentId,
-        status: 'waiting',
-      });
-    }
-    // Re-send team metadata
-    if (agent.teamName) {
-      webview.postMessage({
-        type: 'agentTeamInfo',
-        id: agentId,
-        teamName: agent.teamName,
-        agentName: agent.agentName,
-        isTeamLead: agent.isTeamLead,
-        leadAgentId: agent.leadAgentId,
-        teamUsesTmux: agent.teamUsesTmux,
-      });
-    }
-    // Re-send token usage
-    if (agent.inputTokens > 0 || agent.outputTokens > 0) {
-      webview.postMessage({
-        type: 'agentTokenUsage',
-        id: agentId,
-        inputTokens: agent.inputTokens,
-        outputTokens: agent.outputTokens,
-      });
-    }
-  }
+  resendAgentActivity((msg) => webview.postMessage(msg), agents);
 }
 
 export function sendLayout(

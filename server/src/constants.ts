@@ -32,6 +32,18 @@ export const SESSION_INDEX_POLL_INTERVAL_MS = 5000;
  *  so the file's mtime becomes stale before the dismissal expires. */
 export const DISMISSED_COOLDOWN_MS = 180_000; // 3 minutes
 
+// ── Context Window Usage ────────────────────────────────────
+/** Window size assumed until a transcript proves otherwise. Transcripts never
+ *  state the model's context limit, so this is the floor, not the truth. */
+export const DEFAULT_MAX_CONTEXT_TOKENS = 200_000;
+/** Known window sizes, ascending. The smallest tier that fits the largest
+ *  context observed so far wins; beyond the last tier we round up to a whole
+ *  multiple of it, so an unknown future window still reads under 100%. */
+export const CONTEXT_WINDOW_TIERS = [200_000, 1_000_000] as const;
+/** How much of a transcript's tail to read when seeding an agent's context on
+ *  adoption or restore. Comfortably more than one turn's worth of records. */
+export const CONTEXT_SEED_TAIL_BYTES = 256 * 1024;
+
 // ── Global Session Scanning ─────────────────────────────────
 /** Only adopt global JSONL files larger than this (filters out empty/init-only sessions) */
 export const GLOBAL_SCAN_ACTIVE_MIN_SIZE = 3_072; // 3KB
@@ -65,6 +77,14 @@ export const MAX_PORT = 65_535;
  *  tolerate unknown/missing fields (see ServerConfig.debugLog precedent). */
 export const SERVER_REGISTRY_PROTOCOL_VERSION = 1;
 
+// ── WebSocket close codes (application range 4000-4999) ────
+/** Embedded mode: Bearer token missing or wrong. */
+export const WS_CLOSE_UNAUTHORIZED = 4001;
+/** Standalone mode: the handshake's Origin is not this server's own origin.
+ *  WebSocket connects bypass CORS, so this is the only thing standing between
+ *  a drive-by web page and the privileged client-message channel. */
+export const WS_CLOSE_FORBIDDEN_ORIGIN = 4003;
+
 export const HOOK_EVENT_BUFFER_MS = 5_000;
 /** Grace period after SessionEnd(reason=clear/resume) before triggering onSessionEnd.
  *  /clear and /resume fire SessionEnd then SessionStart within ms. This timeout is a
@@ -79,3 +99,14 @@ export const LAYOUT_FILE_NAME = 'layout.json';
 export const LAYOUT_FILE_POLL_INTERVAL_MS = 2000;
 export const LAYOUT_REVISION_KEY = 'layoutRevision';
 export const CONFIG_FILE_NAME = 'config.json';
+
+// ── Avatar Customization ────────────────────────────────────
+/** Number of pre-colored bundled character palettes (char_0.png–char_5.png).
+ *  Mirrors `PALETTE_COUNT` in webview-ui/src/constants.ts; kept separate
+ *  because the server has no DOM/sprite access and cannot import the webview
+ *  constant. The two values must stay in sync. */
+export const PALETTE_COUNT = 6;
+/** Inclusive upper bound for a valid agent hue shift, in degrees. Used by
+ *  clientMessageHandler to guard saveAgentSeats payloads from a remote or
+ *  hand-edited source corrupting the stored values with out-of-range values. */
+export const HUE_SHIFT_MAX_DEG = 360;

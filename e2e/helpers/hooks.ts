@@ -18,6 +18,31 @@ function getServerJsonPath(tmpHome: string): string {
   return path.join(tmpHome, '.pixel-agents', 'server.json');
 }
 
+/** The events in a HOME's settings.json carrying one of our hook commands, sorted.
+ *
+ *  The command is a path the installer built with path.join, so on Windows it is backslash-separated. Separators are
+ *  folded before matching, exactly as the installer's own identity check does — a literal '/'-only match sees zero of
+ *  our events on Windows and reads a correct install as "nothing installed". */
+export function ourHookEvents(tmpHome: string): string[] {
+  let settings: { hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>> };
+  try {
+    settings = JSON.parse(fs.readFileSync(path.join(tmpHome, '.claude', 'settings.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+  const ours = (command: string | undefined): boolean =>
+    (command ?? '')
+      .replace(/\\/g, '/')
+      .toLowerCase()
+      .includes('.pixel-agents/hooks/claude-hook.js');
+  return Object.entries(settings.hooks ?? {})
+    .filter(([, entries]) =>
+      (entries ?? []).some((e) => (e.hooks ?? []).some((h) => ours(h.command))),
+    )
+    .map(([event]) => event)
+    .sort();
+}
+
 function isHookServerConfig(value: unknown): value is HookServerConfig {
   if (!value || typeof value !== 'object') return false;
 
@@ -156,6 +181,25 @@ export function preToolUseAgent(
     tool_input: {
       description,
       run_in_background: runInBackground,
+    },
+  };
+}
+
+/** PreToolUse for the new-harness Agent tool: background by default, so the
+ *  input carries the agent's name but NO run_in_background flag. */
+export function preToolUseAgentSpawn(
+  sessionId: string,
+  description: string,
+  name: string,
+): HookEventPayload {
+  return {
+    session_id: sessionId,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Agent',
+    tool_input: {
+      name,
+      description,
+      subagent_type: 'general-purpose',
     },
   };
 }

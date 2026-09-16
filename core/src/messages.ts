@@ -24,8 +24,8 @@ export type ServerMessage =
   | SubagentClear
   | SubagentToolPermission
   | AgentTeamInfo
-  | AgentTokenUsage
   | AgentSessionInfo
+  | AgentContextUsage
   | LayoutLoaded
   | FurnitureAssetsLoaded
   | CharacterSpritesLoaded
@@ -34,6 +34,8 @@ export type ServerMessage =
   | WallTilesLoaded
   | CarpetTilesLoaded
   | SettingsLoaded
+  | HooksStatus
+  | HooksConsentRequest
   | ExternalAssetDirectoriesUpdated
   | AreaMappingsLoaded
   | WorkspaceFolders
@@ -49,7 +51,9 @@ export type ClientMessage =
   | SetSoundEnabled
   | SetLastSeenVersion
   | SetAlwaysShowLabels
+  | SetGhostHeadlessAgents
   | SetHooksEnabled
+  | HooksConsentResponse
   | SetHooksInfoShown
   | SetWatchAllSessions
   | SetWatchCoworkSessions
@@ -80,6 +84,8 @@ export interface AgentCreated {
   hooksOnly?: boolean;
   sessionTitle?: string;
   surface?: string;
+  palette?: number;
+  hueShift?: number;
 }
 
 export interface AgentClosed {
@@ -125,6 +131,7 @@ export interface AgentToolStart {
   toolName?: string;
   permissionActive?: boolean;
   runInBackground?: boolean;
+  isTeammateSpawn?: boolean;
 }
 
 export interface AgentToolDone {
@@ -185,18 +192,18 @@ export interface AgentTeamInfo {
   teamUsesTmux?: boolean;
 }
 
-export interface AgentTokenUsage {
-  type: 'agentTokenUsage';
-  id: number;
-  inputTokens: number;
-  outputTokens: number;
-}
-
 export interface AgentSessionInfo {
   type: 'agentSessionInfo';
   id: number;
   title?: string;
   surface?: string;
+}
+
+export interface AgentContextUsage {
+  type: 'agentContextUsage';
+  id: number;
+  contextTokens: number;
+  maxContextTokens: number;
 }
 
 export interface LayoutLoaded {
@@ -282,10 +289,24 @@ export interface SettingsLoaded {
   watchAllSessions: boolean;
   watchCoworkSessions: boolean;
   alwaysShowLabels: boolean;
+  ghostHeadlessAgents: boolean;
   hooksEnabled: boolean;
   hooksInfoShown: boolean;
   externalAssetDirectories: string[];
   showAreas: boolean;
+}
+
+export interface HooksStatus {
+  type: 'hooksStatus';
+  providerId: string;
+  installed: boolean;
+}
+
+export interface HooksConsentRequest {
+  type: 'hooksConsentRequest';
+  providerId: string;
+  headline: string;
+  disclosure: string;
 }
 
 export interface ExternalAssetDirectoriesUpdated {
@@ -364,10 +385,24 @@ export interface SetAlwaysShowLabels {
   enabled: boolean;
 }
 
-export interface SetHooksEnabled {
-  type: 'setHooksEnabled';
+export interface SetGhostHeadlessAgents {
+  type: 'setGhostHeadlessAgents';
   enabled: boolean;
 }
+
+export interface SetHooksEnabled {
+  type: 'setHooksEnabled';
+  providerId: string;
+  enabled: boolean;
+}
+
+export interface HooksConsentResponse {
+  type: 'hooksConsentResponse';
+  providerId: string;
+  choice: HooksConsentChoice;
+}
+
+export type HooksConsentChoice = 'install' | 'notNow' | 'never';
 
 export interface SetHooksInfoShown {
   type: 'setHooksInfoShown';

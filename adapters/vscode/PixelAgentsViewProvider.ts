@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import type { StateAdapter } from '../../core/src/adapter.js';
+import type { HookProvider } from '../../core/src/provider.js';
 import { buildAgentDiagnostics } from '../../server/src/agentDiagnostics.js';
 import { AgentRuntime } from '../../server/src/agentRuntime.js';
 import { AgentStateStore } from '../../server/src/agentStateStore.js';
@@ -26,7 +27,14 @@ import {
   sendWallTilesToWebview,
 } from '../../server/src/assetLoader.js';
 import { loadAllCharacters, loadAllFurniture, loadAllPets } from '../../server/src/assetReload.js';
-import { readConfig, writeConfig } from '../../server/src/configPersistence.js';
+import {
+  getHooksConsent,
+  getHooksEnabled,
+  grantHooksConsent,
+  readConfig,
+  setHooksEnabled as persistHooksEnabled,
+  writeConfig,
+} from '../../server/src/configPersistence.js';
 import { setFolderNameResolver, setTerminalAdapter } from '../../server/src/fileWatcher.js';
 import type { LayoutWatcher } from '../../server/src/layoutPersistence.js';
 import {
@@ -34,8 +42,17 @@ import {
   watchLayoutFile,
   writeLayoutToFile,
 } from '../../server/src/layoutPersistence.js';
+import { PathSet } from '../../server/src/pathKey.js';
 import { CLAUDE_APP_NAME } from '../../server/src/providers/hook/claude/constants.js';
-import { claudeProvider, copyHookScript } from '../../server/src/providers/index.js';
+import type { ConsentEffects } from '../../server/src/providers/hook/consentExecutor.js';
+import { applyConsentChoice } from '../../server/src/providers/hook/consentExecutor.js';
+import { hooksConsentRequest } from '../../server/src/providers/hook/consentGate.js';
+import {
+  claudeProvider,
+  copyHookScript,
+  hookProviderById,
+  hookProviders,
+} from '../../server/src/providers/index.js';
 import { PixelAgentsServer } from '../../server/src/server.js';
 import {
   getProjectDirPath,
@@ -49,7 +66,7 @@ import {
   CONFIG_KEY_AUTO_SHOW_PANEL,
   CONFIG_KEY_AUTO_SPAWN_AGENT,
   GLOBAL_KEY_ALWAYS_SHOW_LABELS,
-  GLOBAL_KEY_HOOKS_ENABLED,
+  GLOBAL_KEY_GHOST_HEADLESS_AGENTS,
   GLOBAL_KEY_HOOKS_INFO_SHOWN,
   GLOBAL_KEY_LAST_SEEN_VERSION,
   GLOBAL_KEY_SHOW_AREAS,
@@ -119,6 +136,8 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         hooksOnly: agent.hooksOnly || undefined,
         sessionTitle: agent.sessionTitle,
         surface: agent.surface,
+        palette: agent.palette,
+        hueShift: agent.hueShift,
       });
     });
     this.store.on('agentRemoved', (id) => {
@@ -208,18 +227,188 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       .then((config) => {
         // Server always starts regardless of hooks-enabled state.
         // It's the foundation for WebSocket transport and health monitoring.
-        // Only hook installation/script-copy is gated by the toggle.
-        const hooksEnabled = this.adapter.getSetting<boolean>(GLOBAL_KEY_HOOKS_ENABLED, true);
+        // Only hook installation/script-copy is gated by the toggle. The
+        // runtime's single hooksEnabled ref follows the Claude provider until
+        // the scanners grow per-provider awareness with the Settings UI.
+        const hooksEnabled = getHooksEnabled(claudeProvider.id);
         this.runtime.hooksEnabled.current = hooksEnabled;
         if (hooksEnabled) {
-          void claudeProvider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
-          copyHookScript(this.context.extensionPath);
+          void this.installHooksIfConsented(config.port, config.token);
         }
         console.log(`[Pixel Agents] Server: ready on port ${config.port}`);
       })
       .catch((e) => {
         console.error(`[Pixel Agents] Failed to start server: ${e}`);
       });
+  }
+
+  /** Copy the hook script, THEN install the settings.json entries, surfacing
+   *  every failure instead of swallowing it.
+   *
+   *  Script first, deliberately: an entry whose command points at a script that
+   *  is not on disk makes Claude Code spawn a dead `node` for every event, so a
+   *  failed copy must abort the install rather than run alongside it. And
+   *  `hooksStatus: true` is sent ONLY after both steps succeeded — it reports
+   *  actual install state, never intent (core/asyncapi.yaml). */
+  private async installHooksAndScript(
+    provider: HookProvider,
+    port: number | undefined,
+    token: string | undefined,
+  ): Promise<void> {
+    // The bundled claude-hook.js script belongs to the Claude provider alone;
+    // another provider's install must neither copy it nor be blocked by it.
+    if (provider.id === claudeProvider.id && !copyHookScript(this.context.extensionPath)) {
+      vscode.window.showErrorMessage(
+        'Pixel Agents: could not install the hook script — hooks not installed.',
+      );
+      await this.reportHooksStatus(provider);
+      return;
+    }
+    try {
+      await provider.installHooks(
+        port !== undefined ? `http://127.0.0.1:${port}` : '',
+        token ?? '',
+      );
+    } catch (err: unknown) {
+      vscode.window.showErrorMessage(
+        `Pixel Agents: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await this.reportHooksStatus(provider);
+      return;
+    }
+    // No success report here: both callers already produce a truthful hooksStatus (setHooksEnabled re-derives, the
+    // startup path rides the webviewReady handshake). A second optimistic send is a duplicate the Intro's seq-driven
+    // verdict could misread.
+  }
+
+  /**
+   * The ordinary Settings-toggle path (the consent gate is separate, below).
+   *
+   * The preference is persisted only AFTER the install/uninstall settled, and
+   * only when the resulting on-disk state agrees with what was asked. Writing
+   * it first is how a user gets stranded: a failed uninstall leaves the entries
+   * on disk and still firing, while a persisted hooks-off makes the next
+   * activation skip the consent/install path entirely — never asked again, and
+   * the checkbox reads "off" so clicking it would install rather than remove.
+   */
+  private async setHooksEnabled(provider: HookProvider, enabled: boolean): Promise<void> {
+    if (enabled) {
+      // An explicit Settings toggle IS the consent to modify the provider's
+      // settings file.
+      grantHooksConsent(provider.id);
+      const serverConfig = this.pixelAgentsServer?.getConfig();
+      await this.installHooksAndScript(provider, serverConfig?.port, serverConfig?.token);
+    } else {
+      try {
+        await provider.uninstallHooks();
+      } catch (err: unknown) {
+        vscode.window.showErrorMessage(
+          `Pixel Agents: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    // Re-derive rather than trust the call: installHooksAndScript already
+    // swallows its own failures into an error message, and either way the file
+    // on disk is the only authority for what is actually firing.
+    let installed: boolean;
+    try {
+      installed = await provider.areHooksInstalled();
+    } catch {
+      return; // the failure was already surfaced; do not also persist on a guess
+    }
+    if (installed === enabled) {
+      persistHooksEnabled(provider.id, enabled);
+      // The runtime's single hooksEnabled ref gates the CLAUDE scanners; it
+      // follows only the Claude provider until the scanners grow per-provider
+      // awareness alongside the Settings UI.
+      if (provider.id === claudeProvider.id) this.runtime.hooksEnabled.current = enabled;
+      console.log(`[Pixel Agents] Hooks ${enabled ? 'enabled' : 'disabled'} by user`);
+    }
+    // Report the truth either way: on failure the entries are still on disk and
+    // still firing, and a checkbox stuck "off" over live hooks offers no retry.
+    this.sendOrBuffer({ type: 'hooksStatus', providerId: provider.id, installed });
+  }
+
+  /** Broadcast the ACTUAL install state, re-derived from the provider's settings file. Every failure path calls it so
+   *  the Settings checkbox — which renders install state, not the preference — self-corrects. Standalone gets it for
+   *  free (it re-derives after every toggle); VS Code has no equivalent seam, so failure paths report explicitly. */
+  private async reportHooksStatus(provider: HookProvider): Promise<void> {
+    try {
+      this.sendOrBuffer({
+        type: 'hooksStatus',
+        providerId: provider.id,
+        installed: await provider.areHooksInstalled(),
+      });
+    } catch {
+      // Never let a status broadcast mask the error already surfaced.
+    }
+  }
+
+  /** First-run consent gate: never touch ~/.claude/settings.json until the
+   *  user has approved it once (persisted in config.json, shared with the
+   *  standalone CLI).
+   *
+   *  The dialog itself lives in the WEBVIEW, not in a native modal: the
+   *  webviewReady handler sends a `hooksConsentRequest` and the app renders
+   *  the same consent modal the standalone browser shows, so both surfaces
+   *  ask on identical terms with one rendering. This method therefore only
+   *  handles the two populations that are NOT asked:
+   *
+   *  - Consent already recorded → install straight away.
+   *  - Our hooks ALREADY present but no recorded consent — a pre-consent
+   *    version installed them silently — consent is granted here and the
+   *    install runs with no prompt at all. That install is the 14 -> 12
+   *    migration, and it only ever REDUCES scope: it drops UserPromptSubmit
+   *    and TaskCreated, the two events that forwarded prompt text and were
+   *    consumed by nothing. Nothing this user already had is expanded, so the
+   *    friction of a prompt buys them nothing they do not already have.
+   *    (This is deliberately NOT the general rule: consent for a fresh
+   *    install is still asked for, in full, in the app.)
+   *
+   *  The fresh-install population gets nothing here — the ask happens when
+   *  the office is opened, which also means hooks are not installed until the
+   *  panel is first viewed. Fail-closed by construction: no answer, no write. */
+  private async installHooksIfConsented(port: number, token: string): Promise<void> {
+    if (getHooksConsent(claudeProvider.id) !== 'granted') {
+      if (!(await claudeProvider.areHooksInstalled())) {
+        return; // fresh install — the webview consent dialog owns this ask
+      }
+      // Already installed and already firing: grant and migrate silently.
+      grantHooksConsent(claudeProvider.id);
+    }
+    await this.installHooksAndScript(claudeProvider, port, token);
+    // Truthful success report for THIS path: a webviewReady handshake that
+    // raced the install read the pre-install state, and installHooksAndScript
+    // itself no longer sends an optimistic status (its other caller,
+    // setHooksEnabled, re-derives on its own).
+    await this.reportHooksStatus(claudeProvider);
+  }
+
+  /** This surface's half of carrying out a consent answer for one provider. The choice→action rule and the write
+   *  order live in the shared consent modules, so the surfaces cannot drift on what counts as approval or on what a
+   *  revised answer undoes; only these effects are VS Code-specific. */
+  private consentEffects(provider: HookProvider): ConsentEffects {
+    return {
+      setHooksEnabled: (enabled) => this.setHooksEnabled(provider, enabled),
+      uninstallHooks: async () => {
+        try {
+          await provider.uninstallHooks();
+        } catch (err: unknown) {
+          vscode.window.showErrorMessage(
+            `Pixel Agents: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      },
+      areHooksInstalled: () => provider.areHooksInstalled(),
+      syncHooksPreferenceOff: () => {
+        // Durable writes are the executor's own atomic recordHooksDecline;
+        // this only mirrors the live runtime ref the CLAUDE scanners read.
+        if (provider.id === claudeProvider.id) {
+          this.runtime.hooksEnabled.current = false;
+        }
+      },
+      reportHooksStatus: () => this.reportHooksStatus(provider),
+    };
   }
 
   resolveWebviewView(webviewView: vscode.WebviewView) {
@@ -305,21 +494,18 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         this.adapter.setSetting(GLOBAL_KEY_LAST_SEEN_VERSION, message.version as string);
       } else if (message.type === 'setAlwaysShowLabels') {
         this.adapter.setSetting(GLOBAL_KEY_ALWAYS_SHOW_LABELS, message.enabled);
+      } else if (message.type === 'setGhostHeadlessAgents') {
+        this.adapter.setSetting(GLOBAL_KEY_GHOST_HEADLESS_AGENTS, message.enabled);
       } else if (message.type === 'setHooksEnabled') {
-        const enabled = message.enabled as boolean;
-        this.adapter.setSetting(GLOBAL_KEY_HOOKS_ENABLED, enabled);
-        this.runtime.hooksEnabled.current = enabled;
-        if (enabled) {
-          const serverConfig = this.pixelAgentsServer?.getConfig();
-          void claudeProvider.installHooks(
-            serverConfig ? `http://127.0.0.1:${serverConfig.port}` : '',
-            serverConfig?.token ?? '',
-          );
-          copyHookScript(this.context.extensionPath);
-          console.log('[Pixel Agents] Hooks enabled by user');
-        } else {
-          void claudeProvider.uninstallHooks();
-          console.log('[Pixel Agents] Hooks disabled by user');
+        // The provider id is echoed by the webview, never originated; an
+        // unknown id names nothing to install into, so it is dropped like a
+        // junk consent choice.
+        const provider = hookProviderById(message.providerId);
+        if (provider) void this.setHooksEnabled(provider, message.enabled as boolean);
+      } else if (message.type === 'hooksConsentResponse') {
+        const provider = hookProviderById(message.providerId);
+        if (provider) {
+          void applyConsentChoice(provider.id, message.choice, this.consentEffects(provider));
         }
       } else if (message.type === 'setHooksInfoShown') {
         this.adapter.setSetting(GLOBAL_KEY_HOOKS_INFO_SHOWN, true);
@@ -342,8 +528,10 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           }
           this.globalDismissedFiles.clear();
         } else {
-          // Remove all external agents not from the current workspace folders
-          const workspaceDirs = new Set<string>();
+          // Remove all external agents not from the current workspace folders.
+          // PathSet: an agent adopted via hooks carries Claude's spelling of the
+          // project dir, which differs from VS Code's by drive-letter case on Windows.
+          const workspaceDirs = new PathSet();
           for (const folder of vscode.workspace.workspaceFolders ?? []) {
             const dir = getProjectDirPath(folder.uri.fsPath);
             if (dir) workspaceDirs.add(dir);
@@ -420,9 +608,16 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           GLOBAL_KEY_ALWAYS_SHOW_LABELS,
           false,
         );
+        const ghostHeadlessAgents = this.adapter.getSetting<boolean>(
+          GLOBAL_KEY_GHOST_HEADLESS_AGENTS,
+          false,
+        );
         this.runtime.watchAllSessions.current = watchAllSessions;
         this.runtime.watchCoworkSessions.current = watchCoworkSessions;
-        const hooksEnabled = this.adapter.getSetting<boolean>(GLOBAL_KEY_HOOKS_ENABLED, true);
+        // settingsLoaded.hooksEnabled stays a single boolean carrying the
+        // CLAUDE provider's preference until the Settings UI grows a
+        // per-provider list — its sole webview reader is the hooks tooltip.
+        const hooksEnabled = getHooksEnabled(claudeProvider.id);
         const hooksInfoShown = this.adapter.getSetting<boolean>(GLOBAL_KEY_HOOKS_INFO_SHOWN, false);
         const showAreas = this.adapter.getSetting<boolean>(GLOBAL_KEY_SHOW_AREAS, false);
         const config = readConfig();
@@ -434,11 +629,45 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           watchAllSessions,
           watchCoworkSessions,
           alwaysShowLabels,
+          ghostHeadlessAgents,
           hooksEnabled,
           hooksInfoShown,
           externalAssetDirectories: config.externalAssetDirectories,
           showAreas,
         });
+
+        // One status + at most one consent ask PER PROVIDER. Install state is distinct from the hooksEnabled
+        // preference, which defaults true while consent is pending. Opening the office is the moment the user can be
+        // asked, so the ask rides this handshake; consentGate owns every condition (standalone calls the same
+        // function). Dismissing sends nothing and re-asks next handshake; either durable answer closes the gate for
+        // good. An embedded webview is privileged by construction — our own iframe, reached through no socket.
+        for (const provider of hookProviders) {
+          // One provider's unreadable settings file degrades to installed=false (the executor's fail-closed read: no
+          // choice uninstalls on a guess) rather than aborting the handshake before restored agents are sent, or
+          // blocking the other providers' statuses.
+          const installed = await provider.areHooksInstalled().catch((err: unknown) => {
+            console.error(
+              `[Pixel Agents] hooks status check failed for provider ${provider.id}:`,
+              err,
+            );
+            return false;
+          });
+          this.webview?.postMessage({
+            type: 'hooksStatus',
+            providerId: provider.id,
+            installed,
+          });
+          const consentRequest = hooksConsentRequest(
+            {
+              installed,
+              hooksEnabled: getHooksEnabled(provider.id),
+              consentAnswered: getHooksConsent(provider.id) !== 'unanswered',
+              privileged: true,
+            },
+            provider,
+          );
+          if (consentRequest) this.webview?.postMessage(consentRequest);
+        }
 
         // Folder→Area mappings (must arrive before any agentCreated/existingAgents
         // so OfficeState.findFreeSeat has the dict when characters are placed).

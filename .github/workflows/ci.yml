@@ -4,6 +4,8 @@ name: CI
 
 on:
   pull_request:
+    branches:
+      - main
     paths-ignore:
       - '**.md'
       - 'LICENSE'
@@ -32,13 +34,13 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Node
         id: setup_node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -100,7 +102,7 @@ jobs:
 
       - name: Upload Linux Webview Allure Results
         if: always() && steps.install_dependencies.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: allure-results-webview-linux
           if-no-files-found: warn
@@ -144,7 +146,7 @@ jobs:
 
       - name: Upload Linux Server Allure Results
         if: always() && steps.build.outcome == 'success' && steps.install_dependencies.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: allure-results-server-linux
           if-no-files-found: warn
@@ -237,10 +239,10 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Node 20
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '20.x'
           cache: npm
@@ -277,12 +279,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -346,7 +348,7 @@ jobs:
 
       - name: Upload E2E Artifacts
         if: always() && steps.install_playwright_deps.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-artifacts-${{ matrix.target.label }}-shard-${{ matrix.shard }}
           if-no-files-found: ignore
@@ -356,7 +358,7 @@ jobs:
 
       - name: Upload Allure Results
         if: always() && steps.install_playwright_deps.outcome == 'success'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: allure-results-e2e-${{ matrix.target.label }}-shard-${{ matrix.shard }}
           if-no-files-found: warn
@@ -421,9 +423,35 @@ jobs:
           done
           exit "$failed"
 
+  # Single aggregate status check to require in branch protection, instead of
+  # pinning every job/shard name (which silently breaks when a shard is renamed
+  # or the shard count changes). Green only when ci, npm-package-node20, and the
+  # whole e2e matrix all succeed.
+  required-checks:
+    name: Required Checks
+    if: always()
+    needs:
+      - ci
+      - npm-package-node20
+      - e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          echo "ci=${{ needs.ci.result }}"
+          echo "npm-package-node20=${{ needs.npm-package-node20.result }}"
+          echo "e2e=${{ needs.e2e.result }}"
+          if [ "${{ needs.ci.result }}" != "success" ] \
+            || [ "${{ needs.npm-package-node20.result }}" != "success" ] \
+            || [ "${{ needs.e2e.result }}" != "success" ]; then
+            echo "::error::One or more required jobs did not succeed"
+            exit 1
+          fi
+          echo "All required jobs succeeded."
+
   deploy-preview-precheck:
     name: Deploy Precheck
-    if: always()
+    if: always() && github.event_name == 'pull_request'
     needs:
       - ci
       - e2e
@@ -438,7 +466,7 @@ jobs:
 
     steps:
       - name: Download Linux E2E Allure Shards
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: allure-results-e2e-linux-shard-*
@@ -446,7 +474,7 @@ jobs:
           merge-multiple: true
 
       - name: Download Windows E2E Allure Shards
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: allure-results-e2e-windows-shard-*
@@ -454,7 +482,7 @@ jobs:
           merge-multiple: true
 
       - name: Download macOS E2E Allure Shards
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: allure-results-e2e-macos-shard-*
@@ -463,7 +491,7 @@ jobs:
 
       - name: Upload Merged Cross-Platform E2E Allure Results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: allure-results-e2e
           if-no-files-found: warn
@@ -513,7 +541,7 @@ jobs:
               ;;
           esac
           {
-            echo "## Hosted Browser Preview"
+            echo "## Hosted Test Report"
             echo
             echo "- Skipped: $reason"
             echo "- Required secrets: \`VERCEL_TOKEN\`, \`VERCEL_ORG_ID\`, \`VERCEL_PROJECT_ID\`."
@@ -536,19 +564,19 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: package-lock.json
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -557,21 +585,21 @@ jobs:
         run: npm ci
 
       - name: Download Cross-Platform E2E Allure Results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: allure-results-e2e
           path: allure-results/e2e
 
       - name: Download Linux Server Allure Results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: allure-results-server-linux
           path: allure-results/server
 
       - name: Download Linux Webview Allure Results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: allure-results-webview-linux
@@ -589,38 +617,25 @@ jobs:
         # `deploy_vercel.outcome == 'success'`, so they skip cleanly on failure.
         continue-on-error: true
         shell: bash
-        env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          GITHUB_REF: ${{ github.ref }}
         run: |
           # --archive=tgz uploads the build output as a single tarball instead
           # of ~480 individual files (the Allure report is many small JSONs).
           # Without it, each deploy burns ~480 of Vercel's free-tier 5000/24h
           # upload-API calls and CI iterations hit "api-upload-free" rate limit.
-          args=(deploy --prebuilt --archive=tgz --token "$VERCEL_TOKEN" --yes)
-          deployment_kind=preview
-
-          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
-            args+=(--prod)
-            deployment_kind=production
-          fi
-
-          deployment_url="$(npx --yes vercel@50.42.0 "${args[@]}")"
-          echo "deployment_kind=$deployment_kind" >> "$GITHUB_OUTPUT"
+          deployment_url="$(npx --yes vercel@50.42.0 deploy --prebuilt --archive=tgz --token "$VERCEL_TOKEN" --yes)"
           echo "deployment_url=$deployment_url" >> "$GITHUB_OUTPUT"
 
       - name: Write Deployment Summary
         if: always() && steps.deploy_vercel.outcome == 'success'
         shell: bash
         env:
-          DEPLOYMENT_KIND: ${{ steps.deploy_vercel.outputs.deployment_kind }}
           DEPLOYMENT_URL: ${{ steps.deploy_vercel.outputs.deployment_url }}
         run: |
           base_url="${DEPLOYMENT_URL%/}"
           {
             echo "## Hosted Test Report"
             echo
-            echo "- Deployment type: $DEPLOYMENT_KIND"
+            echo "- Deployment type: Preview"
             echo "- Deployment URL: $base_url"
             echo "- Allure report (Linux + macOS + Windows): $base_url/reports/allure/"
           } >> "$GITHUB_STEP_SUMMARY"

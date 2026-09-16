@@ -89,6 +89,11 @@ export interface HookProvider {
   uninstallHooks(): Promise<void>;
   /** Check if hooks are currently installed. */
   areHooksInstalled(): Promise<boolean>;
+  /** First-run consent copy for THIS provider's hook install: the headline titles the ask, the disclosure is its body
+   *  (what is written, what data moves, how to undo; paragraphs split on blank lines). Required, not optional — a
+   *  provider that installs anything must state its terms, and the gate ships these verbatim so no client copy can
+   *  drift. */
+  consentDisclosure(): { headline: string; disclosure: string };
 
   /** Format tool status for display (e.g., "Read" -> "Reading foo.ts") */
   formatToolStatus(toolName: string, input?: unknown): string;
@@ -103,6 +108,14 @@ export interface HookProvider {
   /** Terminal name prefix used when launching this CLI. Used by the extension to
    *  match VS Code terminals to agents for heuristic adoption. */
   readonly terminalNamePrefix?: string;
+
+  /** Context window, in tokens, for a model id this CLI reports in its
+   *  transcripts. Transcripts state token usage but never the limit it counts
+   *  against, so only the provider can say — and getting it wrong is visible:
+   *  the office renders usage/window as a context gauge over every character.
+   *  Return undefined for an unrecognized model; the runtime then keeps its
+   *  previous estimate and widens it if a context ever exceeds it. */
+  contextWindowForModel?(model: string | undefined): number | undefined;
 
   // ── Optional file fallback (heuristic mode) ──
 

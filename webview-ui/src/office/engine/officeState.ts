@@ -1,3 +1,4 @@
+import { pickDiversePalette } from '../../../../core/src/paletteUtils.js';
 import {
   AUTO_ON_FACING_DEPTH,
   AUTO_ON_SIDE_DEPTH,
@@ -6,8 +7,8 @@ import {
   CHARACTER_SITTING_OFFSET_PX,
   DISMISS_BUBBLE_FAST_FADE_SEC,
   FURNITURE_ANIM_INTERVAL_SEC,
-  HUE_SHIFT_MIN_DEG,
-  HUE_SHIFT_RANGE_DEG,
+  GREETER_ID,
+  GREETER_TILE_MARGIN,
   INACTIVE_SEAT_TIMER_MIN_SEC,
   INACTIVE_SEAT_TIMER_RANGE_SEC,
   MAX_PET_ID_LENGTH,
@@ -36,18 +37,16 @@ import type {
   Seat,
   TileType as TileTypeVal,
 } from '../types.js';
-import {
-  CharacterState,
-  Direction,
-  MATRIX_EFFECT_DURATION,
-  PetState,
-  TILE_SIZE,
-} from '../types.js';
+import { CharacterState, Direction, PetState, TILE_SIZE } from '../types.js';
 import { isPersistentWaitingBubble } from './bubbleBehavior.js';
 import { createCharacter, updateCharacter } from './characters.js';
-import { matrixEffectSeeds } from './matrixEffect.js';
+import { advanceMatrixEffect, startMatrixEffect } from './matrixEffectState.js';
 import { createPet, updatePet } from './petEntity.js';
-import { closestFreeSeat, subagentFallbackTile } from './subagentPlacement.js';
+import { anchorTile, closestFreeSeat } from './seatPlacement.js';
+import {
+  closestFreeSeat as closestFreeSubagentSeat,
+  subagentFallbackTile,
+} from './subagentPlacement.js';
 
 /** Internal helper: facing-tile coords for a seat. Returns null for invalid direction. */
 function seatFacingOffset(direction: Direction): { dCol: number; dRow: number } {
@@ -84,6 +83,28 @@ export class OfficeState {
    * `findFreeSeat()` to bias new agents toward seats inside their folder's Area.
    */
   areaMappings: Record<string, string[]> = {};
+
+  /**
+   * The first-run consent greeter, deliberately NOT in `characters`.
+   *
+   * `characters` means "agents": everything that iterates it — seat
+   * assignment, palette diversity, the wander FSM, hit-testing, the seat
+   * payload the webview persists — is asking an agent question the greeter has
+   * no answer to. Holding it here instead of tagging it with a flag makes
+   * every one of those loops correct by default, rather than correct as long
+   * as each remembers an `isGreeter` guard. It is drawn because
+   * `getCharacters()` appends it, and that is the only place it joins the
+   * others.
+   */
+  greeter: Character | null = null;
+
+  /** World-space point the camera drifts to while the greeter is up
+   *  (the bubble overlay recomputes it every frame: the combined center of the
+   *  character and its speech bubble). An explicit cameraFollowId outranks it. */
+  greeterCameraTarget: { x: number; y: number } | null = null;
+  /** Latched by a manual pan during the ask: the user took the camera, so the
+   *  overlay's per-frame updates stop re-centering. Reset on spawn/despawn. */
+  private greeterCameraCancelled = false;
 
   setAreaMappings(mappings: Record<string, string[]>): void {
     this.areaMappings = mappings;
@@ -371,6 +392,25 @@ export class OfficeState {
     return this.pickFromSeats(freeSeats, electronicsTiles);
   }
 
+  /** Closest walkable tile to (col,row) not occupied by another character, or null. */
+  private closestFreeWalkableTile(col: number, row: number): { col: number; row: number } | null {
+    const occupied = new Set<string>();
+    for (const ch of this.characters.values()) {
+      occupied.add(`${ch.tileCol},${ch.tileRow}`);
+    }
+    let best: { col: number; row: number } | null = null;
+    let bestDist = Infinity;
+    for (const tile of this.walkableTiles) {
+      if (occupied.has(`${tile.col},${tile.row}`)) continue;
+      const d = Math.abs(tile.col - col) + Math.abs(tile.row - row);
+      if (d < bestDist) {
+        best = tile;
+        bestDist = d;
+      }
+    }
+    return best;
+  }
+
   /**
    * Pick a diverse palette for a new agent based on currently active agents.
    * First 6 agents each get a unique skin (random order). Beyond 6, skins
@@ -384,19 +424,7 @@ export class OfficeState {
       if (ch.isSubagent) continue;
       if (ch.palette < paletteCount) counts[ch.palette]++;
     }
-    const minCount = Math.min(...counts);
-    // Available = palettes at the minimum count (least used)
-    const available: number[] = [];
-    for (let i = 0; i < paletteCount; i++) {
-      if (counts[i] === minCount) available.push(i);
-    }
-    const palette = available[Math.floor(Math.random() * available.length)];
-    // First round (minCount === 0): no hue shift. Subsequent rounds: random ≥45°.
-    let hueShift = 0;
-    if (minCount > 0) {
-      hueShift = HUE_SHIFT_MIN_DEG + Math.floor(Math.random() * HUE_SHIFT_RANGE_DEG);
-    }
-    return { palette, hueShift };
+    return pickDiversePalette(paletteCount, counts);
   }
 
   addAgent(
@@ -406,6 +434,7 @@ export class OfficeState {
     preferredSeatId?: string,
     skipSpawnEffect?: boolean,
     folderName?: string,
+    nearAgentId?: number,
   ): void {
     if (this.characters.has(id)) return;
 
@@ -420,13 +449,21 @@ export class OfficeState {
       hueShift = pick.hueShift;
     }
 
-    // Try preferred seat first, then any free seat
+    // Try preferred seat first, then (for teammates) the seat closest to the
+    // anchor agent, then any free seat. anchorTile resolves to the anchor's SEAT
+    // (stable from creation) rather than its live tile, so a teammate placed while
+    // the lead is still walking to its seat still clusters around the final seat.
+    const anchor = nearAgentId !== undefined ? this.characters.get(nearAgentId) : undefined;
+    const anchorAt = anchorTile(anchor, this.seats);
     let seatId: string | null = null;
     if (preferredSeatId && this.seats.has(preferredSeatId)) {
       const seat = this.seats.get(preferredSeatId)!;
       if (!seat.assigned) {
         seatId = preferredSeatId;
       }
+    }
+    if (!seatId && anchorAt) {
+      seatId = closestFreeSeat(this.seats, anchorAt.col, anchorAt.row);
     }
     if (!seatId) {
       seatId = this.findFreeSeat(folderName);
@@ -438,11 +475,14 @@ export class OfficeState {
       seat.assigned = true;
       ch = createCharacter(id, palette, seatId, seat, hueShift);
     } else {
-      // No seats — spawn at random walkable tile
-      const spawn =
-        this.walkableTiles.length > 0
-          ? this.walkableTiles[Math.floor(Math.random() * this.walkableTiles.length)]
-          : { col: 1, row: 1 };
+      // No seats — teammates spawn beside their anchor, others at a random walkable tile
+      let spawn = anchorAt ? this.closestFreeWalkableTile(anchorAt.col, anchorAt.row) : null;
+      if (!spawn) {
+        spawn =
+          this.walkableTiles.length > 0
+            ? this.walkableTiles[Math.floor(Math.random() * this.walkableTiles.length)]
+            : { col: 1, row: 1 };
+      }
       ch = createCharacter(id, palette, null, null, hueShift);
       ch.x = spawn.col * TILE_SIZE + TILE_SIZE / 2;
       ch.y = spawn.row * TILE_SIZE + TILE_SIZE / 2;
@@ -454,11 +494,65 @@ export class OfficeState {
       ch.folderName = folderName;
     }
     if (!skipSpawnEffect) {
-      ch.matrixEffect = 'spawn';
-      ch.matrixEffectTimer = 0;
-      ch.matrixEffectSeeds = matrixEffectSeeds();
+      startMatrixEffect(ch, 'spawn');
     }
     this.characters.set(id, ch);
+  }
+
+  // ── Greeter ───────────────────────────────────────────────────
+  // The Intro is diegetic: a char_0 character stands near the office's
+  // bottom-left corner and "speaks" the tour through a DOM bubble
+  // (IntroBubble). It is not an agent — see the `greeter` field.
+
+  /** Spawn the greeter near the office's bottom-left corner: target tile
+   *  GREETER_TILE_MARGIN in from the left and bottom edges, falling
+   *  back to the closest walkable tile when the target is a seat, furniture,
+   *  a wall, or VOID (seat tiles are in blockedTiles, so closestFreeWalkableTile
+   *  covers every one of those). Idempotent; a remount mid-despawn (StrictMode)
+   *  revives it. */
+  spawnGreeter(): void {
+    this.greeterCameraCancelled = false;
+    if (this.greeter) {
+      if (this.greeter.matrixEffect === 'despawn') startMatrixEffect(this.greeter, 'spawn');
+      return;
+    }
+    const spawn = this.closestFreeWalkableTile(
+      GREETER_TILE_MARGIN,
+      this.layout.rows - 1 - GREETER_TILE_MARGIN,
+    );
+    if (!spawn) return; // no walkable tile — IntroBubble falls back to a fixed panel
+    const ch = createCharacter(GREETER_ID, 0, null, null, 0);
+    ch.isGreeter = true;
+    ch.state = CharacterState.IDLE;
+    ch.isActive = false;
+    ch.dir = Direction.DOWN;
+    ch.x = spawn.col * TILE_SIZE + TILE_SIZE / 2;
+    ch.y = spawn.row * TILE_SIZE + TILE_SIZE / 2;
+    ch.tileCol = spawn.col;
+    ch.tileRow = spawn.row;
+    startMatrixEffect(ch, 'spawn');
+    this.greeter = ch;
+  }
+
+  /** Start the greeter's despawn effect and release the greeter camera. The
+   *  character is dropped once the effect finishes (see update()).
+   *  Idempotent — every close path (answer, Escape, hooksStatus) funnels here. */
+  despawnGreeter(): void {
+    this.greeterCameraTarget = null;
+    this.greeterCameraCancelled = false;
+    if (!this.greeter || this.greeter.matrixEffect === 'despawn') return;
+    startMatrixEffect(this.greeter, 'despawn');
+  }
+
+  /** Per-frame update from the bubble overlay; ignored once the user panned. */
+  setGreeterCameraTarget(p: { x: number; y: number }): void {
+    if (!this.greeterCameraCancelled) this.greeterCameraTarget = p;
+  }
+
+  /** Manual pan during the ask: stop re-centering until the next spawn. */
+  cancelGreeterCamera(): void {
+    this.greeterCameraTarget = null;
+    this.greeterCameraCancelled = true;
   }
 
   removeAgent(id: number): void {
@@ -473,9 +567,7 @@ export class OfficeState {
     if (this.selectedAgentId === id) this.selectedAgentId = null;
     if (this.cameraFollowId === id) this.cameraFollowId = null;
     // Start despawn animation instead of immediate delete
-    ch.matrixEffect = 'despawn';
-    ch.matrixEffectTimer = 0;
-    ch.matrixEffectSeeds = matrixEffectSeeds();
+    startMatrixEffect(ch, 'despawn');
     ch.bubbleType = null;
   }
 
@@ -520,6 +612,34 @@ export class OfficeState {
       if (!ch.isActive) {
         ch.seatTimer = INACTIVE_SEAT_TIMER_MIN_SEC + Math.random() * INACTIVE_SEAT_TIMER_RANGE_SEC;
       }
+    }
+  }
+
+  /**
+   * Move a just-linked teammate to the free seat closest to its lead, so teams
+   * cluster. Only moves when that seat is strictly closer than the teammate's
+   * current one — a teammate created as a plain external agent (seated by an
+   * arbitrary findFreeSeat) and tagged as a teammate only after tag discovery
+   * would otherwise keep its arbitrary seat, unlike an inline teammate seated
+   * next to the lead at creation.
+   */
+  private reseatNextToLead(teammateId: number, leadId: number): void {
+    const teammate = this.characters.get(teammateId);
+    const lead = this.characters.get(leadId);
+    if (!teammate || !lead) return;
+    const anchorAt = anchorTile(lead, this.seats);
+    if (!anchorAt) return;
+    const target = closestFreeSeat(this.seats, anchorAt.col, anchorAt.row);
+    if (!target || target === teammate.seatId) return;
+    const targetSeat = this.seats.get(target)!;
+    const targetDist =
+      Math.abs(targetSeat.seatCol - anchorAt.col) + Math.abs(targetSeat.seatRow - anchorAt.row);
+    const currentSeat = teammate.seatId ? this.seats.get(teammate.seatId) : undefined;
+    const currentDist = currentSeat
+      ? Math.abs(currentSeat.seatCol - anchorAt.col) + Math.abs(currentSeat.seatRow - anchorAt.row)
+      : Infinity;
+    if (targetDist < currentDist) {
+      this.reassignSeat(teammateId, target);
     }
   }
 
@@ -589,7 +709,7 @@ export class OfficeState {
     // closest to its parent (the FSM then walks it there and sits it). Only when
     // the office is full does it stand behind/next to the parent instead.
     let ch: Character;
-    const seatId = closestFreeSeat(parentCol, parentRow, this.seats);
+    const seatId = closestFreeSubagentSeat(parentCol, parentRow, this.seats);
     if (seatId) {
       const seat = this.seats.get(seatId)!;
       seat.assigned = true;
@@ -618,9 +738,7 @@ export class OfficeState {
 
     ch.isSubagent = true;
     ch.parentAgentId = parentAgentId;
-    ch.matrixEffect = 'spawn';
-    ch.matrixEffectTimer = 0;
-    ch.matrixEffectSeeds = matrixEffectSeeds();
+    startMatrixEffect(ch, 'spawn');
     this.characters.set(id, ch);
 
     this.subagentIdMap.set(key, id);
@@ -647,9 +765,7 @@ export class OfficeState {
         if (seat) seat.assigned = false;
       }
       // Start despawn animation — keep character in map for rendering
-      ch.matrixEffect = 'despawn';
-      ch.matrixEffectTimer = 0;
-      ch.matrixEffectSeeds = matrixEffectSeeds();
+      startMatrixEffect(ch, 'despawn');
       ch.bubbleType = null;
     }
     // Clean up tracking maps immediately so keys don't collide
@@ -678,9 +794,7 @@ export class OfficeState {
             if (seat) seat.assigned = false;
           }
           // Start despawn animation
-          ch.matrixEffect = 'despawn';
-          ch.matrixEffectTimer = 0;
-          ch.matrixEffectSeeds = matrixEffectSeeds();
+          startMatrixEffect(ch, 'despawn');
           ch.bubbleType = null;
         }
         this.subagentMeta.delete(id);
@@ -961,6 +1075,7 @@ export class OfficeState {
   ): void {
     const ch = this.characters.get(id);
     if (!ch) return;
+    const wasUnlinked = ch.leadAgentId === undefined;
     ch.teamName = teamName;
     ch.agentName = agentName;
     ch.isTeamLead = isTeamLead;
@@ -968,13 +1083,32 @@ export class OfficeState {
     if (teamUsesTmux !== undefined) {
       ch.teamUsesTmux = teamUsesTmux;
     }
+    // A teammate is not a headless agent: clicking it focuses its lead's terminal.
+    // Adopted sessions are marked headless at creation and only later discovered
+    // to be teammates, so drop the mark once the link lands.
+    if (leadAgentId !== undefined) {
+      ch.isHeadless = false;
+    }
+    // A teammate discovered only after its plain external session was adopted is
+    // linked here, not at creation, so it never went through the seat-next-to-lead
+    // path addAgent runs for inline teammates. Cluster it now, once, on first link.
+    if (wasUnlinked && leadAgentId !== undefined && !isTeamLead) {
+      this.reseatNextToLead(id, leadAgentId);
+    }
   }
 
-  setAgentTokens(id: number, inputTokens: number, outputTokens: number): void {
+  /** Mark an agent as headless (adopted, no terminal to focus). */
+  setHeadless(id: number, headless: boolean): void {
     const ch = this.characters.get(id);
     if (!ch) return;
-    ch.inputTokens = inputTokens;
-    ch.outputTokens = outputTokens;
+    ch.isHeadless = headless;
+  }
+
+  setAgentContext(id: number, contextTokens: number, maxContextTokens: number): void {
+    const ch = this.characters.get(id);
+    if (!ch) return;
+    ch.contextTokens = contextTokens;
+    ch.maxContextTokens = maxContextTokens;
   }
 
   /** Update session metadata (title / surface) for an existing character.
@@ -1000,23 +1134,18 @@ export class OfficeState {
       this.rebuildFurnitureInstances();
     }
 
+    // The greeter materializes and dematerializes like anyone else, but runs
+    // no FSM — it stands where it spawned for as long as the ask is up.
+    if (this.greeter && advanceMatrixEffect(this.greeter, dt) === 'despawned') {
+      this.greeter = null;
+    }
+
     const toDelete: number[] = [];
     for (const ch of this.characters.values()) {
-      // Handle matrix effect animation
-      if (ch.matrixEffect) {
-        ch.matrixEffectTimer += dt;
-        if (ch.matrixEffectTimer >= MATRIX_EFFECT_DURATION) {
-          if (ch.matrixEffect === 'spawn') {
-            // Spawn complete — clear effect, resume normal FSM
-            ch.matrixEffect = null;
-            ch.matrixEffectTimer = 0;
-            ch.matrixEffectSeeds = [];
-          } else {
-            // Despawn complete — mark for deletion
-            toDelete.push(ch.id);
-          }
-        }
-        continue; // skip normal FSM while effect is active
+      const effect = advanceMatrixEffect(ch, dt);
+      if (effect !== 'none') {
+        if (effect === 'despawned') toDelete.push(ch.id);
+        continue; // skip normal FSM while the effect is (or just was) active
       }
 
       // Temporarily unblock own seat so character can pathfind to it
@@ -1058,13 +1187,36 @@ export class OfficeState {
     }
   }
 
-  getCharacters(): Character[] {
-    return Array.from(this.characters.values());
+  /** The `saveAgentSeats` payload: palette, hue and seat for every agent worth
+   *  restoring. Sub-agents are excluded because they are derived state the
+   *  runtime re-materializes, and the greeter never reaches here at all —
+   *  it is not in `characters`. */
+  getPersistableSeats(): Record<
+    number,
+    { palette: number; hueShift: number; seatId: string | null }
+  > {
+    const seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> = {};
+    for (const ch of this.characters.values()) {
+      if (ch.isSubagent) continue;
+      seats[ch.id] = { palette: ch.palette, hueShift: ch.hueShift, seatId: ch.seatId };
+    }
+    return seats;
   }
 
-  /** Get character at pixel position (for hit testing). Returns id or null. */
+  /** Everything the renderer draws: the agents plus, while the first-run ask
+   *  is up, the consent greeter. This is the ONE place the greeter joins the
+   *  agents — every other consumer reads `characters` and gets agents only. */
+  getCharacters(): Character[] {
+    const chars = Array.from(this.characters.values());
+    if (this.greeter) chars.push(this.greeter);
+    return chars;
+  }
+
+  /** Get character at pixel position (for hit testing). Returns id or null.
+   *  Agents only: clicks pass straight through the consent greeter, which is
+   *  a prop, not something to select or follow. */
   getCharacterAt(worldX: number, worldY: number): number | null {
-    const chars = this.getCharacters().sort((a, b) => b.y - a.y);
+    const chars = Array.from(this.characters.values()).sort((a, b) => b.y - a.y);
     for (const ch of chars) {
       // Skip characters that are despawning
       if (ch.matrixEffect === 'despawn') continue;

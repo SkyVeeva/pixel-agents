@@ -2,6 +2,8 @@
 
 Pixel art office where AI agents (Claude Code terminals today, any tool tomorrow) become animated characters. Ships as a **VS Code extension** and an **`npx pixel-agents` standalone CLI** from the same source tree.
 
+`CONTEXT.md` is the canonical glossary — read it for what terms like Agent, Sub-agent, Teammate, Lead, Adopt, or Headless agent mean here, and use its vocabulary in code, comments, and docs.
+
 ## Architecture
 
 Strict layering: `core/` depends on nothing; `server/` depends only on `core/`; `webview-ui/` depends only on `core/`; `adapters/vscode/` depends on `core/` and `server/`. The standalone CLI never imports `adapters/vscode/` and vice versa.
@@ -29,10 +31,13 @@ server/                              Lifecycle runtime + Fastify HTTP/WS server
       claudeSurfacePaths.ts          Claude.app support-dir layout (Cowork + desktop), per-OS, defensive
       claudeSessionIndex.ts          SessionIndexProvider: reads desktop + Cowork metadata sidecars
       claudeAppFocus.ts              buildFocusUri → claude://resume?session=<id> (null for Cowork)
-      claudeHookInstaller.ts         Atomic install/uninstall in ~/.claude/settings.json
+      claudeHookInstaller.ts         Consent-gated install/uninstall in ~/.claude/settings.json (abort on unparseable file or non-array hooks.<Event>; one-time .pixel-agents.backup, exclusive-create; every write failure THROWS; mode preserved, 0600 on create; re-read verify before rename + retry; hook identity anchored on the claude-hook.js suffix)
+      consentCopy.ts                 Claude's first-run consent disclosure text (scope/data/undo), served through consentDisclosure()
       constants.ts                   Claude hook event names, script path, Claude.app dir names + deep-link prefix
       hooks/claude-hook.ts           Hook script (CJS+shebang, bundled to dist/hooks/claude-hook.js)
-    providers/index.ts               Provider registry
+    providers/hook/consentGate.ts    Provider-agnostic consent POLICY: when to ask (hooksConsentRequest per provider) and what an answer means (consentActionFor(choice, {installed, consent}) — see docs/adr/0001)
+    providers/hook/consentExecutor.ts Provider-agnostic consent EXECUTION: applyConsentChoice(providerId, choice, ConsentEffects) runs the six actions in one order for both surfaces, and SERIALIZES answers per process across ALL providers
+    providers/index.ts               Provider registry (claudeProvider + the hookProviders list the consent gate loops over)
     agentRuntime.ts                  Lifecycle core: timers, scanners, HookEventHandler, SessionRouter, DismissalTracker
     agentStateStore.ts               EventEmitter-backed single source of truth (typed mutations + events)
     sessionRouter.ts                 session_id → agent_id mapping, event buffering, pending external sessions
@@ -44,7 +49,7 @@ server/                              Lifecycle runtime + Fastify HTTP/WS server
     server.ts                        Top-level composition
     cli.ts                           npx pixel-agents entry (npm bin)
     fileStateAdapter.ts              Namespaced ~/.pixel-agents/ persistence
-    configPersistence.ts             { vscode, standalone, externalAssetDirectories }
+    configPersistence.ts             { vscode, standalone, externalAssetDirectories, hooksConsent: {providerId: granted|declined}, hooksEnabled: {providerId: boolean} }
     layoutPersistence.ts             ~/.pixel-agents/layout.json with atomic tmp+rename
     fileWatcher.ts                   Hybrid fs.watch + 500ms polling, JSONL line buffering, /clear detection
     transcriptParser.ts              JSONL parsing for heuristic / file-fallback mode
@@ -61,6 +66,7 @@ adapters/vscode/                     VS Code surface — composes core + server
   PixelAgentsViewProvider.ts         WebviewViewProvider, thin bridge to AgentRuntime
   agentManager.ts                    Terminal lifecycle (claude --session-id <uuid>), restore, persist
   vscodeTerminalAdapter.ts           TerminalAdapter implementation
+  uninstall.ts                       vscode:uninstall hook — removes hook entries + factory-resets hooks config after extension removal
   migrateVsCodeState.ts              One-time legacy state migration (verify-before-clear)
   constants.ts                       VS Code IDs, command names, key names
 
@@ -86,9 +92,12 @@ webview-ui/                          React 19 + Canvas UI (depends only on core/
       useExtensionMessages.ts        Message handler — translates ServerMessage into OfficeState mutations
       useEditorActions.ts            Editor state + callbacks
       useEditorKeyboard.ts           Keyboard shortcuts (R, T, Esc, Ctrl+Z/Y)
+      introTourState.ts              Intro tour wire-state machine (pure reducer, Node-runner tested)
+      useIntroTour.ts                Wires the reducer to React + transport (snapshot, verdict, choices)
     office/
       types.ts                       OfficeLayout, Character, etc. + re-exports constants
-      toolUtils.ts                   STATUS_TO_TOOL mapping, extractToolName, defaultZoom
+      toolUtils.ts                   STATUS_TO_TOOL mapping, extractToolName (DOM-free; defaultZoom lives in useEditorActions)
+      projection.ts                  World→screen math shared by renderer + DOM overlays (mapOffset, overlayProjection)
       colorize.ts                    Colorize (grayscale→HSL) + Adjust (HSL shift)
       floorTiles.ts                  Floor sprite storage + colorized cache
       wallTiles.ts                   Wall auto-tile: 16 bitmask sprites
@@ -105,10 +114,11 @@ webview-ui/                          React 19 + Canvas UI (depends only on core/
         tileMap.ts                   Walkability, BFS pathfinding
       engine/
         characters.ts                Character FSM (idle/walk/type) + wander AI
-        officeState.ts               Game world (layout, characters, seats, selection, subagents)
+        officeState.ts               Game world (layout, characters, seats, selection, subagents, consent greeter)
         gameLoop.ts                  rAF loop with delta-time cap (0.1 s)
         renderer.ts                  Canvas: tiles, z-sorted entities, overlays, edit UI
-        matrixEffect.ts              Spawn/despawn digital rain
+        matrixEffect.ts              Spawn/despawn digital rain (drawing only)
+        matrixEffectState.ts         Effect state: startMatrixEffect/advanceMatrixEffect (DOM-free)
       components/
         OfficeCanvas.tsx             Canvas, resize, DPR, mouse hit-testing, drag-to-move
         ToolOverlay.tsx              Activity label above hovered/selected character
@@ -192,8 +202,8 @@ Adding a new CLI integration is one subdirectory under `server/src/providers/hoo
 
 `core/asyncapi.yaml` is the contract. Pinned to **3.0.0** because `@asyncapi/modelina@5.10.1` declares `supportedVersions: ['3.0.0']` only; bumping to 3.1.0 produces `export type Root = any`. Revisit when Modelina ships 3.1.0 support.
 
-- **29 ServerMessage variants** (server → client): agent lifecycle, agent activity, sub-agent activity, team + tokens, session metadata (`agentSessionInfo` — title/surface), assets, settings + workspace, diagnostics. `AgentCreated`/`ExistingAgents` also carry optional `sessionTitle`/`surface`.
-- **20 ClientMessage variants** (client → server): lifecycle (`webviewReady`, `launchAgent`, `focusAgent`, `closeAgent`), layout (`saveAgentSeats`, `saveLayout`, `exportLayout`, `importLayout`), settings (`setSoundEnabled`, `setHooksEnabled`, `setWatchAllSessions`, `setWatchCoworkSessions`, `setAlwaysShowLabels`, `setHooksInfoShown`, `setLastSeenVersion`), discovery + assets, diagnostics.
+- **ServerMessage variants** (server → client): agent lifecycle, agent activity, sub-agent activity, team + context usage, session metadata (`agentSessionInfo` — title/surface), assets, settings + workspace, diagnostics. `AgentCreated`/`ExistingAgents` also carry optional `sessionTitle`/`surface` plus server-assigned `palette`/`hueShift`.
+- **ClientMessage variants** (client → server): lifecycle (`webviewReady`, `launchAgent`, `focusAgent`, `closeAgent`), layout (`saveAgentSeats`, `saveLayout`, `exportLayout`, `importLayout`), settings (`setSoundEnabled`, `setHooksEnabled`, `setWatchAllSessions`, `setWatchCoworkSessions`, `setAlwaysShowLabels`, `setHooksInfoShown`, `setLastSeenVersion`), discovery + assets, diagnostics.
 
 Both unions use `oneOf` with `discriminator: type`. Every concrete message sets `additionalProperties: false`.
 
@@ -219,7 +229,7 @@ export type TransportState = 'connecting' | 'connected' | 'reconnecting' | 'disc
 
 ## Provider Abstraction
 
-`HookProvider` (`core/src/provider.ts`) is the integration boundary. Today only Claude Code is implemented. The interface:
+`HookProvider` (`core/src/provider.ts`) is the integration boundary. Today only Claude Code is implemented; the Claude provider supports every transcript/hook format up to **Claude Code v2.1.220** (current as of 2026-07-30 — Task-era `agent_progress` records, explicit and implicit teams, background-by-default Agent spawns, sidecar-backed background agents). Newer CLI releases may add formats that need provider updates. The interface:
 
 - **Required**: `normalizeHookEvent(raw)` → `{ sessionId, event: AgentEvent } | null`; `installHooks` / `uninstallHooks` / `areHooksInstalled`; `formatToolStatus`; `permissionExemptTools`, `subagentToolNames`, `readingTools` sets.
 - **Optional file fallback**: `getSessionDirs(workspace)`, `getAllSessionRoots()`, `getAuxiliarySessionRoots()`, `sessionFilePattern`, `parseTranscriptLine(line)`, `buildLaunchCommand(sessionId, cwd, opts)`, `buildFocusUri({sessionId, surface})`. Used when hooks aren't installed / for terminal-less focus. `getAuxiliarySessionRoots()` returns hook-less transcript roots gated by their own setting (Cowork's private `.claude/projects`).
@@ -232,17 +242,29 @@ export type TransportState = 'connecting' | 'connected' | 'reconnecting' | 'disc
 
 Optional extension for CLIs that support team workflows (Claude Agent Teams today). Semantic queries (`discoverTeammates`, `getTeamMembers`, `getTeamMetadataForSession`, `extractTeammateNameFromEvent`, `isTeammateSpawnCall`) — providers choose their own storage strategy.
 
-Three teammate modes:
+Four teammate modes:
 
-| Mode                            | Trigger                                          | Detection                                                             |
-| ------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------- |
-| Basic subagent (teams OFF)      | `Task(...)` or `Agent(run_in_background: false)` | `subagentStart` with team gate not matched, or JSONL `agent_progress` |
-| Inline teammate (teams ON)      | `Agent(run_in_background: true)` in-process      | `onTeammateDetected` → `discoverTeammates(projectDir, leadSessionId)` |
-| Session teammate (teams + tmux) | `Agent(run_in_background: true)` in tmux pane    | Own session, own hooks, routes through normal flow                    |
+| Mode                            | Trigger                                          | Detection                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Basic subagent (teams OFF)      | `Task(...)` or `Agent(run_in_background: false)` | `subagentStart` with team gate not matched, or JSONL `agent_progress`                                                                                                                                                                                                                                                                                                                   |
+| Inline teammate (teams ON)      | `Agent(run_in_background: true)` in-process      | `onTeammateDetected` → `discoverTeammates(projectDir, leadSessionId)`                                                                                                                                                                                                                                                                                                                   |
+| Session teammate (teams + tmux) | `Agent(run_in_background: true)` in tmux pane    | Own session, own hooks, routes through normal flow                                                                                                                                                                                                                                                                                                                                      |
+| Implicit-team agent (Claude 5)  | `Agent(...)` — background by default, NO flag    | Lead-side: spawn tool_result `agent_id: <name>@<team>` → `extractTeammateSpawnFromToolResult` sets lead `teamName`; teammate = own top-level UUID session tagged `teamName`/`agentName` on every record, discovered by `discoverTeammates(projectDir, leadSessionId, teamName)` and fast-attached in `onExternalSessionDetected` (bypasses the Watch All gate when the lead is tracked) |
 
-Teammate dismissal is driven by team config polling (`getTeamMembers(teamName)` is authoritative) and by `sessionEnd` on the lead.
+Newer harnesses (Claude 5) never tag the LEAD's records with team metadata and never write `agent_progress`/`queue-operation` records for these spawns — the spawn tool_result and the teammate's own session (own JSONL, own hooks) are the only signals. The implicit team writes `~/.claude/teams/session-<8hex>/config.json` (its `leadSessionId` matches no transcript on disk — don't link by it). Own-session teammates are registered with the SessionRouter (`setTeammateRegisterCallback`) so their hooks route directly to them.
 
-**Subtle gate (the one that bit us recently)**: in `webview-ui/src/hooks/useExtensionMessages.ts`, `agentToolStart` with `runInBackground=true` only creates a Subtask sub-character when the **parent has no `teamName`**. With a team, `onTeammateDetected` creates the teammate instead (and the gate prevents a ghost sub-agent). Without a team, the teammate path never fires and the basic Subtask sub-character is the only visible representation.
+**Team generations on resume (last-wins latch)**: every CLI run of a session mints a FRESH implicit team, so a resumed lead's transcript carries spawn tool_results from several `session-<8hex>` generations. A tag-less lead re-latches to the newest spawn's team (`setTeamSwitchCallback` removes the defunct team's teammates); tag-derived identity (`teamNameFromTags`, set by the record-tags branch) is authoritative and never overwritten by spawn results. `linkTeammates` never badges a named teammate as LEAD — if only teammates are tracked, linking waits until the real lead is detected (prevents a phantom LEAD character when a teammate session is adopted before/without its lead). Restore drops `isTeamLead` from persisted agents that carry an `agentName`.
+
+**Background spawns without a CLI team (sidecar-backed)**: `Agent(...)` spawns that never register a team take the async path — result "Async agent launched successfully. agentId: \<hex>" (no team anywhere), transcript + sidecar under `<projectDir>/<leadSessionId>/subagents/` (sidecar carries `agentType`/`description`/`toolUseId`, plus `name` when the spawn was named), completion via `queue-operation`. `scanForBackgroundAgentFiles` classifies them by the sidecar `name` — the domain model's sole Sub-agent vs Teammate distinction (see CONTEXT.md):
+
+- **Named → Teammate**: its own seated character, `agentName` from the sidecar `name`; the spawner gets `isTeamLead` + an `agentTeamInfo` broadcast (derived team — NO `teamName`, so config polling stays away) and the transient Subtask is ghost-killed via `subagentClear`. The child has `leadAgentId` + `spawnToolUseId`; it's removed on the completion queue-operation or lead sessionEnd (`removeTeammate` must NOT unregister its session — it shares the lead's).
+- **Unnamed → Sub-agent**: the Subtask sub-character stays; the spawn's transcript is watched in a **shadow `AgentStateStore`** (`server/src/subagentWatch.ts`, owned by `AgentRuntime`, ids from 1 000 000 up) whose broadcasts are translated onto the main store as `subagentToolStart/Done/Permission` keyed `(leadId, spawnToolUseId)` — live activity on the sub-character, no protocol change. `agentToolsClear` on the shadow agent synthesizes `subagentToolDone` for still-live tools so the sub idles between turns. Never persisted, never announced.
+
+The gate for both: the sidecar `toolUseId` must match a LIVE entry in the lead's `backgroundAgentToolIds` (anti-spurious; no teamName involved). `scanForTeammateFiles` skips sidecars carrying a live `toolUseId` so it can't race the classification. The lead's `backgroundAgentToolIds` are persisted (children never are — they're derived state the 1 s scan re-materializes after a reload; restore skips stale entries with `leadAgentId` but no `teamName`). The turn-end background-tool re-sends (transcriptParser, hookEventHandler, timerManager's `clearAgentActivity`) must include `toolName` + `runInBackground` (or the webview can't recreate the Subtask after `agentToolsClear`) and must skip tools whose spawn became a teammate character (`hasPromotedBackgroundAgent`, or a ghost Subtask appears next to it).
+
+Teammate dismissal is driven by team config polling (`getTeamMembers(teamName)` is authoritative; members with `isActive: false` are treated as departed), by the teammate's own `sessionEnd` (own-session teammates), and by `sessionEnd` on the lead.
+
+**Subtle gate (the one that bit us recently)**: in `webview-ui/src/hooks/useExtensionMessages.ts`, `agentToolStart` with `runInBackground=true` only creates a Subtask sub-character when the **parent has no `teamName`**. With a team, `onTeammateDetected` creates the teammate instead (and the gate prevents a ghost sub-agent). Without a team, the teammate path never fires and the basic Subtask sub-character is the only visible representation. The gate's blind spot — a TEAMED lead's unnamed background spawn — is covered by `subagentToolStart` creating the sub-character lazily when it's missing (`addSubagent` is idempotent); the same lazy path recreates subs after a panel reload.
 
 ### Claude ecosystem surfaces (Cowork + desktop app)
 
@@ -301,6 +323,13 @@ Fastify v5 with `@fastify/cors`, `@fastify/websocket`, and (in standalone) `@fas
 | GET    | `/ws`                    | Bidirectional protocol channel          |
 | GET    | `/*` (standalone only)   | Webview SPA via `@fastify/static`       |
 
+`/ws` is gated in **two tiers**, because `setHooksEnabled(true)` over this socket is a durable, machine-wide consent grant plus a hook install.
+
+1. **Connection** (`isAllowedWebSocketOrigin`): embedded requires the Bearer token; standalone requires a same-origin handshake. A missing Origin still connects (non-browser clients send none). This tier is weak by design — a DNS-rebound page sends `Origin` and `Host` as the same attacker-chosen name and IS accepted (`httpServerWs.test.ts` pins that).
+2. **Privileged messages** (`standaloneTokenValid`, `ClientMessageContext.privileged`): proved by an out-of-band secret — embedded via its Bearer token, standalone via the server token in the `/ws` `?token=` query, which the CLI prints in the local URL and the SPA forwards (`webview-ui/src/transport/index.ts`). **Never a network position**: peer address, `Host` and `Origin` all ride the channel a proxy speaks, so a LAN-bound forwarder piping bytes to 127.0.0.1 satisfies all three. The token is a replayable bearer capability, not evidence of locality — it also reaches browser history and Fastify's request log, so the printed URL is documented to the user as a secret. An untokened client still watches the office; it just cannot change `~/.claude/settings.json`.
+
+The **hooks preference is persisted only after the install/uninstall settled and the on-disk result agrees** — writing it first strands the user when an uninstall fails: entries still firing, but a persisted hooks-off makes the next startup skip the consent/install path entirely.
+
 Server discovery written to `~/.pixel-agents/server.json` with `{ port, pid, authToken }`. Multi-window safe: a second server detects an existing `server.json` and reuses or replaces it based on PID liveness.
 
 ### ClientMessageHandler
@@ -309,13 +338,13 @@ Single dispatch point for `ClientMessage`. Each variant calls into `AgentRuntime
 
 ### ServerAgentState (server/src/types.ts)
 
-Per-agent runtime data: provider reference, session key, transcript-fallback fields (`jsonlFile`, `fileOffset`, `lineBuffer`), tool state Maps and Sets, team fields (`teamName`, `agentName`, `isTeamLead`, `leadAgentId`, `teamUsesTmux`), token usage, and the **`hookDelivered`** flag that suppresses heuristic timers when hooks are flowing.
+Per-agent runtime data: provider reference, session key, transcript-fallback fields (`jsonlFile`, `fileOffset`, `lineBuffer`), tool state Maps and Sets, team fields (`teamName`, `agentName`, `isTeamLead`, `leadAgentId`, `teamUsesTmux`), context usage (`contextTokens`, `maxContextTokens`, `sawMainChainUsage`), and the **`hookDelivered`** flag that suppresses heuristic timers when hooks are flowing.
 
 ## Persistence
 
 ```
 ~/.pixel-agents/
-  config.json              { vscode, standalone, externalAssetDirectories }
+  config.json              { vscode, standalone, externalAssetDirectories, hooksConsent, hooksEnabled (both per-provider) }
   vscode-state.json        { agents, seats }
   standalone-state.json    { agents, seats }
   layout.json              OfficeLayout (shared across surfaces)
@@ -323,7 +352,7 @@ Per-agent runtime data: provider reference, session key, transcript-fallback fie
   hooks/claude-hook.js     Bundled hook script (CJS, shebang)
 ```
 
-`FileStateAdapter({ namespace })` backs both runtimes. Per-namespace settings: `soundEnabled`, `lastSeenVersion`, `alwaysShowLabels`, `watchAllSessions`, `watchCoworkSessions`, `hooksEnabled`, `hooksInfoShown`. Running both surfaces in parallel never clobbers either.
+`FileStateAdapter({ namespace })` backs both runtimes. Per-namespace settings: `soundEnabled`, `lastSeenVersion`, `alwaysShowLabels`, `watchAllSessions`, `watchCoworkSessions`, `hooksInfoShown` (the hooks preference is per-provider and machine-global, at the config top level). Running both surfaces in parallel never clobbers either.
 
 `migrateVsCodeState` (VS Code adapter only) walks each known legacy key once with **verify-before-clear** semantics: write to file, read back, only then clear the legacy key. While anything remains unmigrated, activation shows a non-blocking warning.
 
@@ -339,10 +368,10 @@ JSONL transcripts at `~/.claude/projects/<project-hash>/<session-id>.jsonl`. Pro
 
 ### Dual-mode detection
 
-| Mode                     | Source                                                 | Detection                                                                                                                                                                                                       |
-| ------------------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Hooks** (preferred)    | Claude Code Hooks API → HTTP POST → `HookEventHandler` | Instant, reliable. 11 events: `SessionStart`, `SessionEnd`, `Stop`, `PermissionRequest`, `Notification`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SubagentStart`, `SubagentStop` |
-| **Heuristic** (fallback) | Polling JSONL files                                    | Per-agent 500 ms JSONL polling for /clear detection; 1 s main scanner for terminal adoption; 3 s external scanner; 30 s stale check. Content-based /clear detection (`/clear</command-name>` in first 8 KB)     |
+| Mode                     | Source                                                 | Detection                                                                                                                                                                                                                                                                         |
+| ------------------------ | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Hooks** (preferred)    | Claude Code Hooks API → HTTP POST → `HookEventHandler` | Instant, reliable. Installed events are `CLAUDE_HOOK_EVENTS`. `UserPromptSubmit`/`TaskCreated` are deliberately NOT installed — they normalize to null, so installing them only forwarded prompt text to be dropped; `normalizeHookEvent` still tolerates them for stale installs |
+| **Heuristic** (fallback) | Polling JSONL files                                    | Per-agent 500 ms JSONL polling for /clear detection; 1 s main scanner for terminal adoption; 3 s external scanner; 30 s stale check. Content-based /clear detection (`/clear</command-name>` in first 8 KB)                                                                       |
 
 The `hookDelivered` flag (per agent) and `hooksEnabled` (global) gate timer logic. JSONL polling always runs in both modes for tool content (status text, animations); only permission (7 s) and text-idle (5 s) timers are suppressed by `hookDelivered`.
 
@@ -353,6 +382,17 @@ When a sub-agent runs a non-exempt tool, `startPermissionTimer` fires on the par
 `activeSubagentToolNames: Map<parentToolId, Map<subToolId, toolName>>` tracks which sub-tools are active for the exempt check. Cleared when data resumes, Task completes, or `turn_duration` arrives.
 
 **Timing budget for tests**: the test waits for the bubble AFTER waiting for the "Subtask:" overlay. But the Subtask overlay appears when the parent's **Task tool_use** is parsed (scenario time T), while the timer only starts when the **sub-tool tool_use** in the progress record is parsed (~1 s later). Plus 7 s timer + 300 ms IPC/render slop = a wait timeout less than ~10 s is unsafe.
+
+### Context usage (server/src/contextUsage.ts)
+
+Every agent's context gauge. Fed from `message.usage` on assistant records by `processTranscriptLine`, broadcast as `agentContextUsage` and rendered by `ToolOverlay`.
+
+- **Snapshot, not a total.** Context = the newest turn's `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens`. Summing turns measures spend, not occupancy, and misses the cached tokens that ARE the context (`input_tokens` is single digits once caching kicks in). Falls on compaction and `/clear` for free.
+- **All-zero usage means "no news"** — synthetic records (API errors, interrupts) report zeros and must not blank the gauge.
+- **Sidechain rule**: a lead's sidechain records are its sub-agents' turns and must not move its gauge; a teammate's own transcript is sidechain top to bottom and would otherwise never report. Positional latch (`sawMainChainUsage`): once a file produces a main-chain turn, later sidechain records belong to someone else.
+- **The window comes from the provider**, not from the runtime: `HookProvider.contextWindowForModel(model)` (Claude: 1M for the current line, 200k for Haiku and the older models, `undefined` for ids it can't place). Transcripts state usage but never the limit, and guessing 200k for a 1M model reads five times too full. `widenContextWindow` is the backstop for unrecognized models and unknown-larger windows — it only ever widens, since a context that doesn't fit disproves the assumption while a shrinking one proves nothing.
+- **`seedContextUsage` runs once per agent in `startFileWatching`** — the single seam every watched agent passes through. Agents adopted or restored mid-session start at end-of-file, so without a tail read they'd have no gauge until their next turn.
+- Sub-agents get no gauge: no session of their own, and the shadow store never forwards `agentContextUsage`.
 
 ## Office UI
 
@@ -368,7 +408,7 @@ Custom ESLint rules (`eslint-rules/pixel-agents-rules.mjs`) enforce: `no-inline-
 
 **Spawn/despawn effect**: Matrix-style digital rain animation (0.3 s). 16 vertical columns sweep top-to-bottom with staggered timing. Spawn: green rain reveals character pixels. Despawn: character pixels consumed by green rain trails. `matrixEffect` field on Character (`'spawn'`/`'despawn'`/`null`). Normal FSM is paused during effect. Restored agents (`existingAgents`) use `skipSpawnEffect: true` to appear instantly.
 
-**Sub-agents**: Negative IDs (from -1 down). Created on `agentToolStart` with "Subtask:" prefix. Same palette + hueShift as parent. Click focuses parent terminal. Not persisted. Spawn at closest free seat to parent (Manhattan distance); fallback: closest walkable tile.
+**Sub-agents**: Negative IDs (from -1 down). Created on `agentToolStart` with "Subtask:" prefix, or lazily by `subagentToolStart` when missing (watched background spawns, post-reload recreation). Same palette + hueShift as parent. Click focuses parent terminal. Not persisted. Spawn at the closest free walkable tile to the parent (`closestFreeWalkableTile`) — around it, never in a seat. Idle (stop typing) when every tracked sub-tool row is done; overlay shows the latest non-done sub-tool status, falling back to the Subtask label.
 
 **Speech bubbles**: Waiting bubble (green checkmark) is persistent while the agent is awaiting user input (`waitingAwaitingInput`), and transient (auto-fades ~2 s) for a finished turn ("Done"). The persist-vs-fade rule lives in `isPersistentWaitingBubble` (shared by the renderer and the update loop). Permission ("..." amber dots) stays until clicked/cleared.
 
@@ -434,40 +474,42 @@ Three tiers, each with its own framework.
 
 `server/__tests__/` — Vitest, ~300 tests. Highlights:
 
-| File                           | Coverage                                                            |
-| ------------------------------ | ------------------------------------------------------------------- |
-| `agentStateStore.test.ts`      | Mutations, EventEmitter events, snapshot, persist round-trip        |
-| `hookEventHandler.test.ts`     | Routing, buffering, normalized dispatch, team gating                |
-| `sessionRouter.test.ts`        | session_id mapping, pending sessions, buffer flush                  |
-| `fileWatcherDismissal.test.ts` | DismissalTracker integration                                        |
-| `fileStateAdapter.test.ts`     | Namespaced persistence, allowlist, settings round-trip              |
-| `configPersistence.test.ts`    | Area settings + `watchCoworkSessions` default/round-trip/coercion   |
-| `migrateVsCodeState.test.ts`   | Verify-before-clear, partial migration                              |
-| `teamUtils.test.ts`            | Inline-teammate helpers                                             |
-| `claudeTeamProvider.test.ts`   | Discovery, membership, metadata extraction                          |
-| `claudeSurfacePaths.test.ts`   | Claude.app path walk (non-UUID account), aux roots, isCoworkPath    |
-| `claudeSessionIndex.test.ts`   | Desktop + Cowork sidecar parsing, malformed/missing skip            |
-| `sessionIndexPoller.test.ts`   | Join/enrich/archive-removal/disappearance/prefix-fallback           |
-| `appFocus.test.ts`             | Per-OS command selection, dispatch, best-effort no-throw            |
-| `claudeAppFocus.test.ts`       | `buildFocusUri` desktop vs Cowork (null)                            |
-| `agentRuntime.test.ts`         | Foreign-session gate; `removeAgentsBySurface`; session-index poll   |
-| `claude.test.ts`               | `normalizeHookEvent` per Claude event, file fallback                |
-| `claudeHookInstaller.test.ts`  | Atomic install/uninstall                                            |
-| `claude-hook.test.ts`          | Spawned hook script integration (needs `dist/hooks/claude-hook.js`) |
-| `server.test.ts`               | HTTP lifecycle, auth, `/ws`, broadcast                              |
-| `mockClaudeRunner.test.ts`     | E2E scenario runner sanity                                          |
+| File                           | Coverage                                                                                                                                       |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agentStateStore.test.ts`      | Mutations, EventEmitter events, snapshot, persist round-trip                                                                                   |
+| `hookEventHandler.test.ts`     | Routing, buffering, normalized dispatch, team gating                                                                                           |
+| `sessionRouter.test.ts`        | session_id mapping, pending sessions, buffer flush                                                                                             |
+| `fileWatcherDismissal.test.ts` | DismissalTracker integration                                                                                                                   |
+| `fileStateAdapter.test.ts`     | Namespaced persistence, allowlist, settings round-trip                                                                                         |
+| `configPersistence.test.ts`    | Area settings + `watchCoworkSessions` default/round-trip/coercion                                                                              |
+| `migrateVsCodeState.test.ts`   | Verify-before-clear, partial migration                                                                                                         |
+| `teamUtils.test.ts`            | Inline-teammate helpers                                                                                                                        |
+| `claudeTeamProvider.test.ts`   | Discovery, membership, metadata extraction                                                                                                     |
+| `claudeSurfacePaths.test.ts`   | Claude.app path walk (non-UUID account), aux roots, isCoworkPath                                                                               |
+| `claudeSessionIndex.test.ts`   | Desktop + Cowork sidecar parsing, malformed/missing skip                                                                                       |
+| `sessionIndexPoller.test.ts`   | Join/enrich/archive-removal/disappearance/prefix-fallback                                                                                      |
+| `appFocus.test.ts`             | Per-OS command selection, dispatch, best-effort no-throw                                                                                       |
+| `claudeAppFocus.test.ts`       | `buildFocusUri` desktop vs Cowork (null)                                                                                                       |
+| `agentRuntime.test.ts`         | Foreign-session gate; `removeAgentsBySurface`; session-index poll                                                                              |
+| `claude.test.ts`               | `normalizeHookEvent` per Claude event, file fallback                                                                                           |
+| `claudeHookInstaller.test.ts`  | Atomic install/uninstall, unparseable-file + non-array abort, throwing writes, mode preservation, backup, hook identity, event-scope migration |
+| `consentFlow.test.ts`          | In-app consent over the wire: who is asked, what each answer writes, Back-and-revise semantics, answer serialization                           |
+| `claude-hook.test.ts`          | Spawned hook script integration (needs `dist/hooks/claude-hook.js`)                                                                            |
+| `server.test.ts`               | HTTP lifecycle, auth, `/ws`, broadcast                                                                                                         |
+| `httpServerWs.test.ts`         | `/ws` gate: standalone same-origin, embedded Bearer                                                                                            |
+| `mockClaudeRunner.test.ts`     | E2E scenario runner sanity                                                                                                                     |
 
 Run: `npm run test:server` (or `npm test` for all).
 
 ### Webview unit (Vitest, Node runner)
 
-`webview-ui/test/` — `build-subpath.test.ts`, `dev-assets.test.ts`. Asset wiring and Vite plugin smoke tests.
+`webview-ui/test/` covers office state, layout editing and migration, assets, changelog behavior, and Vite/browser wiring.
 
 Run: `npm run test:webview`.
 
 ### End-to-end (Playwright)
 
-`e2e/` — Playwright tests against a real VS Code Electron instance + a standalone Fastify server. **76 tests** (see `e2e/README.md` for the authoritative inventory), run on CI as a 3-OS x 3-shard matrix (Linux, macOS, Windows; each shard runs ~1/3 of the suite at `--workers=1`).
+`e2e/` — Playwright tests against a real VS Code Electron instance + a standalone Fastify server (see `e2e/README.md` for the authoritative inventory), run on CI as a 3-OS x 3-shard matrix (Linux, macOS, Windows; each shard runs ~1/3 of the suite at `--workers=1`).
 
 | Area (`@area:<tag>`) | Specs                                                                               | What                                                                                                                                                               |
 | -------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -537,7 +579,7 @@ The webview Vite dev server is **not** included in `npm run watch` — it has to
 
 ### CI
 
-Single workflow runs (in order): install, lint, `asyncapi:validate`, `asyncapi:generate` + drift check, `e2e:inventory` + drift check, `check-types`, `test:server`, `test:webview`, `e2e` (3-OS x 3-shard matrix: Linux, macOS, Windows), `package`, Vercel preview deploy (gated on secrets; gracefully skips on forks, non-blocking on failure).
+Single workflow runs (in order): install, lint, `asyncapi:validate`, `asyncapi:generate` + drift check, `e2e:inventory` + drift check, `check-types`, `test:server`, `test:webview`, `e2e` (3-OS x 3-shard matrix: Linux, macOS, Windows), `package`, then a PR-only Vercel preview deploy of the combined Allure report (gated on secrets; gracefully skips on forks, non-blocking on failure). Pushes to `main` run the checks but never deploy to Vercel.
 
 The drift checks are the central guarantees: `core/asyncapi.yaml` ↔ `core/src/messages.ts` stay in lockstep; `e2e/README.md` stays in sync with the spec list.
 
@@ -591,8 +633,9 @@ Use `console.log`/`error`/`warn` with prefixed context:
 - OfficeCanvas selection changes are imperative (`editorState.selectedFurnitureUid`); must call `onEditorSelectionChange()` to trigger React re-render for toolbar.
 - **External-session adoption**: scanner runs every 3 s. In hooks-OFF mode external scenarios, the test setup can race the first scanner tick. Mock-claude scenarios should give a few seconds of margin before assertions.
 - **Heuristic sub-agent permission bubble timing**: the bubble lands 7 s after the SUB-TOOL is registered, not 7 s after the parent Task tool appears. Tests waiting on it from the "Subtask:" overlay need at least `1 s (Task→Bash gap) + 7 s timer + ~300 ms IPC/render = 9–10 s` budget.
-- **runInBackground sub-character gate**: in webview `agentToolStart`, `runInBackground=true` Agent tools are gated out of sub-character creation when the parent has a `teamName` (teammate path handles it). With no `teamName`, the gate must be bypassed so the basic Subtask sub-character still renders. `addSubagent` dedups via `subagentIdMap`, so the bypass is safe even if a teammate is detected later.
+- **runInBackground sub-character gate**: in webview `agentToolStart`, `runInBackground=true` Agent tools are gated out of sub-character creation when the parent has a `teamName` (teammate path handles it). With no `teamName`, the gate must be bypassed so the basic Subtask sub-character still renders. `addSubagent` dedups via `subagentIdMap`, so the bypass is safe even if a teammate is detected later. `subagentToolStart` creates the sub lazily when it's missing — covering teamed leads' unnamed background spawns and post-reload recreation.
 - **Allure HTML report**: viewing via `file://` fails (browsers block `fetch()` from local files). Use `npx allure open allure-report/allure` or `npm run test:report:open`.
+- **Context usage is a snapshot against a provider-declared window**, and both halves are easy to get wrong: cumulative sums measure spend rather than occupancy, `input_tokens` without the cache counters measures almost nothing, and a 200k window assumed for a 1M model reads five times too full (the number to check it against is Claude Code's own statusline `context_window.used_percentage`).
 
 ## Manual Hook Testing
 
@@ -616,7 +659,7 @@ Supporting: `wall-tile-editor.html` (wall sprite editing), `jsonl-viewer.html` (
 
 ## Key Decisions
 
-- **Four-package monorepo** with strict layering (core → server → adapters; core → webview-ui). Standalone CLI never imports `adapters/vscode/` and vice versa.
+- **Layered codebase** (core → server → adapters; core → webview-ui). Standalone CLI never imports `adapters/vscode/` and vice versa.
 - **AsyncAPI 3.0 contract**, generated TS bindings, CI drift check. Single source of truth for the wire protocol.
 - **AgentRuntime** shared lifecycle core, composed by both surfaces.
 - **AgentStateStore** as single source of truth with typed mutations and typed events. No transport calls outside the broadcast layer.
@@ -629,6 +672,10 @@ Supporting: `wall-tile-editor.html` (wall sprite editing), `jsonl-viewer.html` (
 - **Inline esbuild problem matcher** (no extra extension needed).
 - **`erasableSyntaxOnly`** in webview forbids `enum` — use `as const` objects.
 - **Server always starts** regardless of hooks toggle. Only hook installation is gated by the setting.
+- **Consent before any FIRST settings-file write**, per provider (`hooksConsent: {providerId: 'granted'|'declined'}`, absent = unanswered; the `hooksEnabled` preference beside it is per-provider and machine-global). **Exactly one population is asked: the one with nothing of ours installed** — hooks already on disk are granted silently at startup, since that install only ever removes events. The ask is one step of the Intro, the four-step first-run tour a greeter character speaks in-app on both surfaces (`IntroBubble.tsx`); the server sends `hooksConsentRequest` during the `webviewReady` handshake, one per provider, privileged connections only, carrying the provider's own `consentDisclosure()` so no client-side copy can drift. The ask-or-not predicate, the choice→action rule, and the execution live ONCE in `server/src/providers/hook/` (`consentGate.ts` decides, `consentExecutor.ts` performs); surfaces supply only their effects. **A choice is an absolute state command, not an event** — Back re-opens the ask, so a revision undoes whatever the earlier answer left: hooks on disk, a grant a failed install recorded, or a decline's own persisted hooks-off. That is why the consent record is a tri-state and each answer commits in ONE config write; the full rule and its rejected alternatives are `docs/adr/0001`. An abort (close x, Escape) sends nothing and the whole Intro returns next open; the closing step reports the install OUTCOME, not the click.
+- **`hooksStatus` is install state, `hooksEnabled` is preference.** The Settings checkbox binds to `hooksInstalled` and toggles the _displayed_ state with no optimistic local update, so it can't read "on" over an untouched settings.json and lands correct rather than flickering when an install fails. Every failure path re-derives and broadcasts the truth (standalone via `clientMessageHandler`, VS Code via `reportHooksStatus`). The hook script is copied BEFORE the entries are written; a failed copy aborts the install (entries pointing at a missing script spawn a dead `node` per event). **Hooks-off is persisted only AFTER a successful uninstall** — flipping it first strands the user: the entries keep firing while the persisted preference makes the next start skip the gate entirely.
+- **Never rewrite a shape we did not author.** The unparseable-file abort generalizes: a non-object `hooks`, a non-array `hooks.<Event>`, and junk entries inside an event array are all refused or passed through, never replaced. An array `hooks` was the sharp case — string keys assigned onto it vanish from `JSON.stringify`, so the write committed and reported `installed: true` over a file with no hooks in it. Emptied event keys are deleted only when _our_ removal emptied them. **Internal sentinels must not be values user JSON can hold**: `null` marked "this entry is now empty", so a user-authored `null` inside a hooks array was silently deleted (a file with no Pixel Agents command anywhere came back rewritten and logged as "Hooks removed") — it is a `Symbol` now.
+- **Hook identity is anchored at both ends, not a substring.** `includes('claude-hook.js') && includes('.pixel-agents')` claimed — and `uninstallHooks` then DELETED — a `.backup` copy of our script, a shell comment naming our path, a wrapper passing it as an argument, `/opt/evil.pixel-agents/hooks/claude-hook.js`, and `my-pixel-agents-hook.js`. Ours = the `/.pixel-agents/hooks/claude-hook.js` suffix, ending the command's FIRST token, matched **case-insensitively** (the token is normalized to lower case). Case-sensitive matching is what shipped, and on the case-insensitive volumes this runs on (macOS, Windows) a differently-cased path is the SAME INODE as our script and genuinely firing: reinstall appended a duplicate and uninstall left the cased entry as an orphan our own `areHooksInstalled` could no longer see — a live hook with no removal route. The folding is unconditional (no filesystem case-sensitivity probe), so the accepted trade is a Linux-only false positive that is **not** a mere dedup: on a case-sensitive volume `~/.Pixel-Agents/hooks/claude-hook.js` is a genuinely DIFFERENT file, we classify it as ours, and uninstall **deletes** it (`claudeHookInstaller.test.ts` pins that removal). Nothing creates that path, and the trade is deliberate — the alternative is a guaranteed unremovable live hook on the two platforms this actually ships to. A symlink alias to our script is deliberately _not_ recognized — the cost is one duplicate entry, versus deleting a stranger's hook if we resolved paths.
 - **E2E over webview unit tests** for OSS friction. Community PRs change webview internals constantly; unit tests would force contributors to update internals tests on top of feature work. E2E pins user-facing behavior, which is stable across internal refactors.
 
 ## Project Identity

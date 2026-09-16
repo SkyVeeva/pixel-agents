@@ -37,6 +37,7 @@ import {
 } from '../../../helpers/mock-claude';
 import {
   closeAgentFromOverlay,
+  expectAgentOverlayGone,
   expectNoOverlay,
   expectNoOverlayWithTexts,
   expectOverlayCount,
@@ -44,6 +45,7 @@ import {
   expectOverlayVisibleForAgent,
   expectOverlayVisibleWithTexts,
   expectSingleAgentOverlay,
+  getOverlayByAgentId,
   readAgentOverlayIds,
 } from '../../../helpers/office';
 import {
@@ -362,13 +364,25 @@ test.describe('Hooks ON / lifecycle', () => {
     narrator.check('old character shows "Running: npm run before-resume"');
 
     narrator.step('resume arrives AFTER the grace window — the old character should be cleaned up');
-    await expectOverlayCount(frame, 0, 8_000);
-    narrator.check('old character removed (count → 0)');
+    // Id-scoped on purpose: the replacement session renders ~700ms after the
+    // grace-expiry removal, so a global count-0 assertion has to catch a sub-
+    // second all-gone window that slow CI runners poll right past (macOS CI
+    // failed exactly this way). The contract is "the OLD character goes away".
+    await expectAgentOverlayGone(frame, oldAgentId, 8_000);
+    narrator.check('old character removed');
     await expectOverlayVisible(frame, 'Running: npm run late-resume', 10_000);
+    await expectOverlayCount(frame, 1);
     const [newAgentId] = await readAgentOverlayIds(frame);
     expect(newAgentId).toBeDefined();
     expect(newAgentId).not.toBe(oldAgentId);
-    narrator.check('late-resumed session gets a NEW character with a different id');
+    // The old agent must be GONE, not reassigned: a reassignment would have kept
+    // oldAgentId on the surviving character (that is the within-grace behavior, and
+    // the id check above would catch it), a zombie would leave two overlays.
+    // Asserted on the end state rather than on a transient count of 0 — the cleanup
+    // and the replacement's adoption land within a few hundred ms of each other, so
+    // polling for the empty office in between is a coin flip.
+    await expect(getOverlayByAgentId(frame, oldAgentId)).toHaveCount(0);
+    narrator.check('late-resumed session gets a NEW character; the old one is gone');
   });
 
   test('three parallel Task subagents in one turn render distinct sub-characters @area:lifecycle', async ({
@@ -1360,8 +1374,11 @@ test.describe('Hooks ON / lifecycle', () => {
   // setSettings UI toggle → file on disk.
   //
   // Pixel-agents hook entries are recognised by the command string containing
-  // 'claude-hook.js' (or legacy 'pixel-agents-hook.js'); see
-  // server/src/providers/hook/claude/claudeHookInstaller.ts::isOurHookEntry.
+  // BOTH 'claude-hook.js' and the '.pixel-agents' directory (or legacy
+  // 'pixel-agents-hook.js'); see
+  // server/src/providers/hook/claude/claudeHookInstaller.ts::isOurHookCommand.
+  // These test helpers match on the script names alone, which is fine here:
+  // every command the installer writes contains the full path.
 
   function readClaudeSettings(tmpHome: string): {
     hooks?: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
@@ -1568,10 +1585,15 @@ test.describe('Hooks ON / lifecycle', () => {
     // assertion is about the FLIPPED state surviving a reload, not about the
     // initial default value.
     const initial = await getSettingChecked(frame, 'Always Show Labels');
-    narrator.step('flipping "Always Show Labels" in Settings');
-    await setSettings(frame, { alwaysShowLabels: !initial });
+    const initialGhost = await getSettingChecked(frame, 'Display Headless as Ghosts');
+    narrator.step('flipping "Always Show Labels" + "Display Headless as Ghosts" in Settings');
+    await setSettings(frame, {
+      alwaysShowLabels: !initial,
+      ghostHeadlessAgents: !initialGhost,
+    });
     expect(await getSettingChecked(frame, 'Always Show Labels')).toBe(!initial);
-    narrator.check('"Always Show Labels" is now flipped');
+    expect(await getSettingChecked(frame, 'Display Headless as Ghosts')).toBe(!initialGhost);
+    narrator.check('both toggles are now flipped');
 
     // Force a fresh webview by closing and reopening the panel (same
     // mechanism the restored-agents test uses for the existingAgents restore path).
@@ -1583,6 +1605,7 @@ test.describe('Hooks ON / lifecycle', () => {
     // After settingsLoaded re-hydrates, the toggle must still be in the
     // flipped state — not back to the fixture default.
     expect(await getSettingChecked(frame, 'Always Show Labels')).toBe(!initial);
+    expect(await getSettingChecked(frame, 'Display Headless as Ghosts')).toBe(!initialGhost);
     narrator.check('flipped state survives the reload — persisted through config.json');
   });
 

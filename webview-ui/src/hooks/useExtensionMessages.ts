@@ -1,7 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
+import type { HooksConsentRequest } from '../../../core/src/messages.js';
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
+import type { ExistingAgentMeta, PendingAgent } from '../office/engine/existingAgents.js';
+import { reconcileExistingAgents } from '../office/engine/existingAgents.js';
 import type { OfficeState } from '../office/engine/officeState.js';
+import { setGhostHeadlessAgents as setRendererGhostHeadlessAgents } from '../office/engine/renderer.js';
 import { setFloorSprites } from '../office/floorTiles.js';
 import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js';
 import { migrateLayoutColors } from '../office/layout/layoutSerializer.js';
@@ -15,8 +19,19 @@ import {
 } from '../office/toolUtils.js';
 import type { OfficeLayout, ToolActivity } from '../office/types.js';
 import { setWallSprites } from '../office/wallTiles.js';
-import { isE2E } from '../runtime.js';
+import { isBrowserRuntime, isE2E } from '../runtime.js';
 import { transport } from '../transport/index.js';
+
+/**
+ * A Headless agent is one the office adopted from outside (`claude -p`, a session
+ * picked up by Watch All Sessions) and therefore has no terminal to focus. Its
+ * character renders translucent so it reads as untouchable at a glance.
+ *
+ * Standalone is exempt: that adapter has no terminals at all, so every agent
+ * would qualify and the cue would distinguish nothing.
+ */
+const isHeadlessAgent = (isExternal: boolean | undefined): boolean =>
+  isExternal === true && !isBrowserRuntime;
 
 export interface SubagentCharacter {
   id: number;
@@ -74,9 +89,24 @@ interface ExtensionMessageState {
   watchCoworkSessions: boolean;
   setWatchCoworkSessions: (v: boolean) => void;
   alwaysShowLabels: boolean;
+  ghostHeadlessAgents: boolean;
+  setGhostHeadlessAgents: (v: boolean) => void;
   hooksEnabled: boolean;
   setHooksEnabled: (v: boolean) => void;
+  /** Actual install state per provider (hooksStatus messages) — absent/false
+   *  while first-run consent is pending, unlike hooksEnabled which defaults
+   *  true. Keyed by providerId; today's Settings checkbox reads 'claude'. */
+  hooksInstalled: Record<string, boolean>;
+  /** Bumped per provider on every hooksStatus message. `hooksInstalled` alone cannot say "the server answered": a
+   *  failed install re-reports the `false` already held, so no effect runs. The Intro needs the ARRIVAL to tell a
+   *  pending install from a failed one, per provider — A's status is never a verdict on B's install. */
+  hooksStatusSeq: Record<string, number>;
   hooksInfoShown: boolean;
+  /** First-run consent ask (hooksConsentRequest). Non-null while the server waits on an answer; carries the provider
+   *  and the server's exact disclosure copy, so the consent step renders the terms being approved with no client
+   *  duplicate to drift. Cleared on answer/dismissal, and by a matching provider's hooksStatus installed=true. */
+  consentRequest: HooksConsentRequest | null;
+  dismissConsentRequest: (providerId: string | null) => void;
   // Areas
   areaMappings: Record<string, string[]>;
   setAreaMappings: (m: Record<string, string[]>) => void;
@@ -85,12 +115,7 @@ interface ExtensionMessageState {
 }
 
 function saveAgentSeats(os: OfficeState): void {
-  const seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> = {};
-  for (const ch of os.characters.values()) {
-    if (ch.isSubagent) continue;
-    seats[ch.id] = { palette: ch.palette, hueShift: ch.hueShift, seatId: ch.seatId };
-  }
-  transport.send({ type: 'saveAgentSeats', seats });
+  transport.send({ type: 'saveAgentSeats', seats: os.getPersistableSeats() });
 }
 
 export function useExtensionMessages(
@@ -119,25 +144,39 @@ export function useExtensionMessages(
   const [watchAllSessions, setWatchAllSessions] = useState(false);
   const [watchCoworkSessions, setWatchCoworkSessions] = useState(false);
   const [alwaysShowLabels, setAlwaysShowLabels] = useState(false);
+  const [ghostHeadlessAgents, setGhostHeadlessAgentsState] = useState(false);
   const [hooksEnabled, setHooksEnabled] = useState(true);
+  const [hooksInstalled, setHooksInstalled] = useState<Record<string, boolean>>({});
+  const [hooksStatusSeq, setHooksStatusSeq] = useState<Record<string, number>>({});
   const [hooksInfoShown, setHooksInfoShown] = useState(true);
+  // FIFO of pending consent asks, at most one per provider (a re-ask replaces that provider's entry in place). The
+  // HEAD is what the Intro renders; answering, dismissing, or mooting it advances to the next provider's ask rather
+  // than dropping it — the server sends one request per provider on the same handshake.
+  const [consentQueue, setConsentQueue] = useState<HooksConsentRequest[]>([]);
+  const consentRequest = consentQueue[0] ?? null;
   const [areaMappings, setAreaMappings] = useState<Record<string, string[]>>({});
   const [showAreas, setShowAreas] = useState(false);
+
+  // The renderer keeps its own module-level copy (read every rAF frame), so both
+  // sources of truth move together — the persisted value on settingsLoaded and
+  // the user's click in Settings.
+  const applyGhostHeadlessAgents = useCallback((enabled: boolean) => {
+    setGhostHeadlessAgentsState(enabled);
+    setRendererGhostHeadlessAgents(enabled);
+  }, []);
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false);
 
+  // Live background spawn tools per agent (runInBackground agentToolStart, or a
+  // lazily-created watched sub). Their sub-characters outlive the parent's turn:
+  // agentToolsClear must NOT remove them — despawning and re-creating moved the
+  // character to a new tile every turn. Cleared by subagentClear/agentClosed.
+  const backgroundParentToolIdsRef = useRef<Record<number, Set<string>>>({});
+
   useEffect(() => {
     // Buffer agents from existingAgents until layout is loaded
-    let pendingAgents: Array<{
-      id: number;
-      palette?: number;
-      hueShift?: number;
-      seatId?: string;
-      folderName?: string;
-      sessionTitle?: string;
-      surface?: string;
-    }> = [];
+    let pendingAgents: PendingAgent[] = [];
 
     // Session metadata (title/surface) that arrived before its character existed
     // (e.g. an agentSessionInfo poll between existingAgents and layoutLoaded).
@@ -214,9 +253,7 @@ export function useExtensionMessages(
         // Add buffered agents now that layout (and seats) are correct
         for (const p of pendingAgents) {
           os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
-          if (p.sessionTitle !== undefined || p.surface !== undefined) {
-            os.setSessionInfo(p.id, p.sessionTitle, p.surface);
-          }
+          if (p.isHeadless) os.setHeadless(p.id, true);
         }
         pendingAgents = [];
         // Flush any session-info updates that raced ahead of character creation
@@ -251,10 +288,19 @@ export function useExtensionMessages(
         if (isTeammate && teammateParentId !== undefined) {
           // Teammate: inherit parent's palette and workspace folderName (teammate runs
           // in the same workspace as the lead). Name shown via agentName (teamRoleLabel).
+          // Seat them at the free seat closest to the lead so the team clusters.
           const parentCh = os.characters.get(teammateParentId);
           const palette = parentCh ? parentCh.palette : undefined;
           const hueShift = parentCh ? parentCh.hueShift : undefined;
-          os.addAgent(id, palette, hueShift, undefined, undefined, parentCh?.folderName);
+          os.addAgent(
+            id,
+            palette,
+            hueShift,
+            undefined,
+            undefined,
+            parentCh?.folderName,
+            teammateParentId,
+          );
           noteFolderName(parentCh?.folderName);
           // Set team metadata on the character
           const ch = os.characters.get(id);
@@ -264,8 +310,13 @@ export function useExtensionMessages(
             ch.agentName = teammateName;
           }
         } else {
-          os.addAgent(id, undefined, undefined, undefined, undefined, folderName);
+          const palette = msg.palette as number | undefined;
+          const hueShift = msg.hueShift as number | undefined;
+          os.addAgent(id, palette, hueShift, undefined, undefined, folderName);
           noteFolderName(folderName);
+          if (isHeadlessAgent(msg.isExternal as boolean | undefined)) {
+            os.setHeadless(id, true);
+          }
         }
         if (sessionTitle !== undefined || surface !== undefined) {
           os.setSessionInfo(id, sessionTitle, surface);
@@ -300,31 +351,44 @@ export function useExtensionMessages(
           return next;
         });
         // Remove all sub-agent characters belonging to this agent
+        delete backgroundParentToolIdsRef.current[id];
         os.removeAllSubagents(id);
         setSubagentCharacters((prev) => prev.filter((s) => s.parentAgentId !== id));
         os.removeAgent(id);
       } else if (msg.type === 'existingAgents') {
         const incoming = msg.agents as number[];
-        const meta = (msg.agentMeta || {}) as Record<
-          number,
-          { palette?: number; hueShift?: number; seatId?: string }
-        >;
+        const meta = (msg.agentMeta || {}) as Record<number, ExistingAgentMeta>;
         const folderNames = (msg.folderNames || {}) as Record<number, string>;
         const sessionTitles = (msg.sessionTitles || {}) as Record<number, string>;
         const surfaces = (msg.surfaces || {}) as Record<number, string>;
-        // Buffer agents — they'll be added in layoutLoaded after seats are built
+        const externalAgents = (msg.externalAgents || {}) as Record<number, boolean>;
+        const headlessAgents: Record<number, boolean> = {};
         for (const id of incoming) {
-          const m = meta[id];
-          pendingAgents.push({
-            id,
-            palette: m?.palette,
-            hueShift: m?.hueShift,
-            seatId: m?.seatId,
-            folderName: folderNames[id],
-            sessionTitle: sessionTitles[id],
-            surface: surfaces[id],
-          });
           noteFolderName(folderNames[id]);
+          if (isHeadlessAgent(externalAgents[id])) headlessAgents[id] = true;
+          // Session title/surface ride the same order-independent path as
+          // agentSessionInfo: applied now if the character exists, else buffered
+          // in pendingSessionInfo and flushed when it is created.
+          if (sessionTitles[id] !== undefined || surfaces[id] !== undefined) {
+            applySessionInfo(id, sessionTitles[id], surfaces[id]);
+          }
+        }
+        // Order-independent restore: add agents now if the layout (and its seats)
+        // is already built, otherwise buffer them for the next layoutLoaded.
+        // Depending on layoutLoaded always arriving last stranded restored agents
+        // on surfaces that send layout first (issue #334).
+        if (
+          reconcileExistingAgents(
+            os,
+            incoming,
+            meta,
+            folderNames,
+            layoutReadyRef.current,
+            pendingAgents,
+            headlessAgents,
+          )
+        ) {
+          saveAgentSeats(os);
         }
         setAgents((prev) => {
           const ids = new Set(prev);
@@ -368,9 +432,20 @@ export function useExtensionMessages(
         //   - parent has NO teamName: no teammate path exists, so we must still
         //     create the Subtask sub-character or the background task is invisible.
         const runInBackground = msg.runInBackground as boolean | undefined;
+        if (runInBackground) {
+          const set = (backgroundParentToolIdsRef.current[id] ??= new Set());
+          set.add(toolId);
+        }
+        // Named spawns are Teammates-to-be: a teammate character will represent
+        // them, so never create the Subtask ghost the teammate would replace.
+        const isTeammateSpawn = msg.isTeammateSpawn as boolean | undefined;
         const parentChar = os.characters.get(id);
         const parentHasTeam = !!parentChar?.teamName;
-        if (isSubagentToolName(toolName) && (!runInBackground || !parentHasTeam)) {
+        if (
+          isSubagentToolName(toolName) &&
+          !isTeammateSpawn &&
+          (!runInBackground || !parentHasTeam)
+        ) {
           const label = status.startsWith('Subtask:') ? status.slice('Subtask:'.length).trim() : '';
           const subId = os.addSubagent(id, toolId);
           setSubagentCharacters((prev) => {
@@ -391,27 +466,51 @@ export function useExtensionMessages(
         });
       } else if (msg.type === 'agentToolsClear') {
         const id = msg.id as number;
+        const bgSet = backgroundParentToolIdsRef.current[id];
         setAgentTools((prev) => {
           if (!(id in prev)) return prev;
           const next = { ...prev };
           delete next[id];
           return next;
         });
+        // Keep sub-tool rows of live background spawns: their sub-characters
+        // survive the parent's turn end and stay animated by their own activity.
         setSubagentTools((prev) => {
-          if (!(id in prev)) return prev;
+          const agentSubs = prev[id];
+          if (!agentSubs) return prev;
+          const kept: Record<string, ToolActivity[]> = {};
+          for (const [parentToolId, rows] of Object.entries(agentSubs)) {
+            if (bgSet?.has(parentToolId)) kept[parentToolId] = rows;
+          }
           const next = { ...prev };
-          delete next[id];
+          if (Object.keys(kept).length === 0) {
+            delete next[id];
+          } else {
+            next[id] = kept;
+          }
           return next;
         });
-        // Remove all sub-agent characters belonging to this agent.
-        // Exception: team leads with inline teammates -- their sub-agents represent
-        // real teammates and should only be removed by SubagentStop/subagentClear.
+        // Remove this agent's sub-agent characters, EXCEPT:
+        // - team leads with inline teammates: their sub-agents represent real
+        //   teammates, removed only by SubagentStop/subagentClear;
+        // - live background spawns: removing + re-creating them on every turn
+        //   end teleported the character (subagentClear removes them for real).
         const clearCh = os.characters.get(id);
         const hasInlineTeammates =
           clearCh?.teamName && clearCh?.isTeamLead && !clearCh?.teamUsesTmux;
         if (!hasInlineTeammates) {
-          os.removeAllSubagents(id);
-          setSubagentCharacters((prev) => prev.filter((s) => s.parentAgentId !== id));
+          const doomed: string[] = [];
+          for (const meta of os.subagentMeta.values()) {
+            if (meta.parentAgentId === id && !bgSet?.has(meta.parentToolId)) {
+              doomed.push(meta.parentToolId);
+            }
+          }
+          for (const parentToolId of doomed) {
+            os.removeSubagent(id, parentToolId);
+          }
+          setSubagentCharacters((prev) =>
+            prev.filter((s) => s.parentAgentId !== id || bgSet?.has(s.parentToolId)),
+          );
         }
         os.setAgentTool(id, null);
         os.clearPermissionBubble(id);
@@ -488,15 +587,27 @@ export function useExtensionMessages(
             [id]: { ...agentSubs, [parentToolId]: [...list, { toolId, status, done: false }] },
           };
         });
-        // Update sub-agent character's tool and active state. The sub-agent was
-        // created by an earlier agentToolStart from JSONL using the same (real)
-        // parentToolId, so this lookup resolves.
-        const subId = os.getSubagentId(id, parentToolId);
-        if (subId !== null) {
-          const subToolName = extractToolName(status);
-          os.setAgentTool(subId, subToolName);
-          os.setAgentActive(subId, true);
+        // Update sub-agent character's tool and active state. The sub-agent is
+        // usually created by an earlier agentToolStart from JSONL using the same
+        // (real) parentToolId. When it's missing — a teamed lead's background
+        // spawn (the creation gate above suppressed the Subtask) or a reloaded
+        // panel that lost it — create it lazily; addSubagent is idempotent.
+        let subId = os.getSubagentId(id, parentToolId);
+        if (subId === null) {
+          subId = os.addSubagent(id, parentToolId);
+          const newSubId = subId;
+          setSubagentCharacters((prev) => {
+            if (prev.some((s) => s.id === newSubId)) return prev;
+            return [...prev, { id: newSubId, parentAgentId: id, parentToolId, label: '' }];
+          });
+          // Only watched background spawns are created lazily -- mark the
+          // parent tool as background so agentToolsClear preserves the sub.
+          const set = (backgroundParentToolIdsRef.current[id] ??= new Set());
+          set.add(parentToolId);
         }
+        const subToolName = extractToolName(status);
+        os.setAgentTool(subId, subToolName);
+        os.setAgentActive(subId, true);
       } else if (msg.type === 'subagentToolDone') {
         const id = msg.id as number;
         const parentToolId = msg.parentToolId as string;
@@ -517,6 +628,7 @@ export function useExtensionMessages(
       } else if (msg.type === 'subagentClear') {
         const id = msg.id as number;
         const parentToolId = msg.parentToolId as string;
+        backgroundParentToolIdsRef.current[id]?.delete(parentToolId);
         setSubagentTools((prev) => {
           const agentSubs = prev[id];
           if (!agentSubs || !(parentToolId in agentSubs)) return prev;
@@ -590,6 +702,9 @@ export function useExtensionMessages(
         if (typeof msg.alwaysShowLabels === 'boolean') {
           setAlwaysShowLabels(msg.alwaysShowLabels as boolean);
         }
+        if (typeof msg.ghostHeadlessAgents === 'boolean') {
+          applyGhostHeadlessAgents(msg.ghostHeadlessAgents as boolean);
+        }
         if (typeof msg.hooksEnabled === 'boolean') {
           setHooksEnabled(msg.hooksEnabled as boolean);
         }
@@ -607,6 +722,39 @@ export function useExtensionMessages(
         }
         if (typeof msg.extensionVersion === 'string') {
           setExtensionVersion(msg.extensionVersion as string);
+        }
+      } else if (msg.type === 'hooksStatus') {
+        if (typeof msg.installed === 'boolean' && typeof msg.providerId === 'string') {
+          const providerId = msg.providerId as string;
+          const installed = msg.installed as boolean;
+          setHooksInstalled((m) => ({ ...m, [providerId]: installed }));
+          setHooksStatusSeq((m) => ({ ...m, [providerId]: (m[providerId] ?? 0) + 1 }));
+          if (installed) {
+            // Moot once THIS provider's hooks are installed — the Settings toggle or another tab granted consent
+            // while the dialog was open. Drop it from the queue (head or queued) rather than let a stale approval
+            // re-install; another provider's status is not about this ask.
+            setConsentQueue((q) => q.filter((r) => r.providerId !== providerId));
+          }
+        }
+      } else if (msg.type === 'hooksConsentRequest') {
+        if (
+          typeof msg.providerId === 'string' &&
+          typeof msg.headline === 'string' &&
+          typeof msg.disclosure === 'string'
+        ) {
+          const request: HooksConsentRequest = {
+            type: 'hooksConsentRequest',
+            providerId: msg.providerId as string,
+            headline: msg.headline as string,
+            disclosure: msg.disclosure as string,
+          };
+          setConsentQueue((q) => {
+            const i = q.findIndex((r) => r.providerId === request.providerId);
+            if (i === -1) return [...q, request];
+            const next = q.slice();
+            next[i] = request; // a re-ask carries the freshest copy
+            return next;
+          });
         }
       } else if (msg.type === 'externalAssetDirectoriesUpdated') {
         if (Array.isArray(msg.dirs)) {
@@ -633,9 +781,9 @@ export function useExtensionMessages(
           msg.leadAgentId as number | undefined,
           msg.teamUsesTmux as boolean | undefined,
         );
-      } else if (msg.type === 'agentTokenUsage') {
+      } else if (msg.type === 'agentContextUsage') {
         const id = msg.id as number;
-        os.setAgentTokens(id, msg.inputTokens as number, msg.outputTokens as number);
+        os.setAgentContext(id, msg.contextTokens as number, msg.maxContextTokens as number);
       } else if (msg.type === 'agentSessionInfo') {
         applySessionInfo(
           msg.id as number,
@@ -649,6 +797,21 @@ export function useExtensionMessages(
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getOfficeState]);
+
+  // Idle sub-agent characters between their turns: when every tracked tool row
+  // for a sub is done, stop its typing animation (a later subagentToolStart
+  // reactivates it). Watched background sub-agents get a synthesized done for
+  // each live tool at their turn end, so they sit idle instead of typing forever.
+  useEffect(() => {
+    const os = getOfficeState();
+    for (const sub of subagentCharacters) {
+      const rows = subagentTools[sub.parentAgentId]?.[sub.parentToolId];
+      if (rows && rows.length > 0 && rows.every((t) => t.done)) {
+        os.setAgentTool(sub.id, null);
+        os.setAgentActive(sub.id, false);
+      }
+    }
+  }, [subagentTools, subagentCharacters, getOfficeState]);
 
   return {
     agents,
@@ -670,9 +833,25 @@ export function useExtensionMessages(
     watchCoworkSessions,
     setWatchCoworkSessions,
     alwaysShowLabels,
+    ghostHeadlessAgents,
+    setGhostHeadlessAgents: applyGhostHeadlessAgents,
     hooksEnabled,
+    hooksInstalled,
+    hooksStatusSeq,
     setHooksEnabled,
     hooksInfoShown,
+    consentRequest,
+    // Called when a tour ends (answer + Let's Go, the X, Escape) with the providerId that tour was ABOUT, removing
+    // that entry so the next provider's ask becomes the head. Keyed by id, not a blind shift: an answered ask's own
+    // installed:true moot may already have removed the head, and a shift would then drop the NEXT provider's ask
+    // unanswered. An aborted ask returns on the next connect; the queue never re-adds it here.
+    dismissConsentRequest: useCallback(
+      (providerId: string | null) =>
+        setConsentQueue((q) =>
+          providerId === null ? q.slice(1) : q.filter((r) => r.providerId !== providerId),
+        ),
+      [],
+    ),
     areaMappings,
     setAreaMappings,
     showAreas,

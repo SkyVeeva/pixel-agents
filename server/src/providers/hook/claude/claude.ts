@@ -17,7 +17,13 @@ import {
 import { claudeSessionIndex } from './claudeSessionIndex.js';
 import { getCoworkAuxProjectRoots } from './claudeSurfacePaths.js';
 import { claudeTeamProvider } from './claudeTeamProvider.js';
-import { CLAUDE_TERMINAL_NAME_PREFIX } from './constants.js';
+import { CONSENT_DISCLOSURE, CONSENT_INSTALL_HEADLINE } from './consentCopy.js';
+import {
+  CLAUDE_LARGE_CONTEXT_WINDOW,
+  CLAUDE_SMALL_CONTEXT_MODEL_PATTERN,
+  CLAUDE_SMALL_CONTEXT_WINDOW,
+  CLAUDE_TERMINAL_NAME_PREFIX,
+} from './constants.js';
 
 // ── formatToolStatus: moved from src/transcriptParser.ts ──
 
@@ -164,7 +170,10 @@ function normalizeHookEvent(
       return { sessionId, event: { kind: 'turnEnd' } };
 
     case 'UserPromptSubmit':
-      // No normalized kind for user prompts yet; silently ignore.
+      // No normalized kind for user prompts yet; silently ignore. No longer
+      // installed (it forwarded the prompt text here only to be dropped), but a
+      // stale install keeps POSTing it until its next install/uninstall runs,
+      // so the drop must stay graceful.
       return null;
 
     case 'SubagentStart': {
@@ -239,7 +248,9 @@ function normalizeHookEvent(
         event: { kind: 'subagentTurnEnd', parentToolId: 'current', reason: 'completed' },
       };
 
-    // TaskCreated is informational; no AgentEvent shape fits it. Drop.
+    // TaskCreated is informational; no AgentEvent shape fits it. Drop. No
+    // longer installed for that reason, but stale installs still POST it —
+    // keep tolerating it here.
     case 'TaskCreated':
     default:
       return null;
@@ -248,18 +259,43 @@ function normalizeHookEvent(
 
 // ── Installer wrappers: adapt sync signatures to async interface ──
 
-function installHooks(_serverUrl: string, _authToken: string): Promise<void> {
-  installerInstallHooks();
-  return Promise.resolve();
+/** Async so an installer throw (e.g. unparseable settings.json) always reaches
+ *  callers as a rejection they can surface, never a sync throw. */
+async function installHooks(_serverUrl: string, _authToken: string): Promise<void> {
+  await installerInstallHooks();
 }
 
-function uninstallHooks(): Promise<void> {
-  installerUninstallHooks();
-  return Promise.resolve();
+async function uninstallHooks(): Promise<void> {
+  await installerUninstallHooks();
 }
 
 function areHooksInstalled(): Promise<boolean> {
   return Promise.resolve(installerAreHooksInstalled());
+}
+
+/** This provider's first-run consent terms. The strings live in
+ *  consentCopy.ts (Claude-specific facts: the event count, the settings
+ *  path); the shared consent gate ships them verbatim to the Intro. */
+function consentDisclosure(): { headline: string; disclosure: string } {
+  return { headline: CONSENT_INSTALL_HEADLINE, disclosure: CONSENT_DISCLOSURE };
+}
+
+// ── Context windows ──
+
+/**
+ * Window a Claude model's context is measured against.
+ *
+ * Claude Code writes the model id on every assistant record but never the
+ * limit, so this table is the only thing standing between the context gauge and a
+ * wrong denominator -- assuming 200k for a 1M model reads five times too full.
+ * Unknown ids return undefined so the runtime keeps whatever it already
+ * assumed rather than adopting a fresh guess.
+ */
+export function contextWindowForModel(model: string | undefined): number | undefined {
+  if (!model || model === '<synthetic>') return undefined;
+  return CLAUDE_SMALL_CONTEXT_MODEL_PATTERN.test(model)
+    ? CLAUDE_SMALL_CONTEXT_WINDOW
+    : CLAUDE_LARGE_CONTEXT_WINDOW;
 }
 
 // ── The provider ──
@@ -275,12 +311,14 @@ export const claudeProvider: HookProvider = {
   installHooks,
   uninstallHooks,
   areHooksInstalled,
+  consentDisclosure,
 
   formatToolStatus,
   permissionExemptTools: new Set(['Task', 'Agent', 'AskUserQuestion']),
   subagentToolNames: new Set(['Task', 'Agent']),
   readingTools: new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch']),
   terminalNamePrefix: CLAUDE_TERMINAL_NAME_PREFIX,
+  contextWindowForModel,
 
   getSessionDirs,
   getAllSessionRoots,

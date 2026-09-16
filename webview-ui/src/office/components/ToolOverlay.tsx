@@ -3,25 +3,25 @@ import { useEffect, useState } from 'react';
 import { Button } from '../../components/ui/Button.js';
 import {
   CHARACTER_SITTING_OFFSET_PX,
-  FUEL_COLOR_CRITICAL,
-  FUEL_COLOR_DANGER,
-  FUEL_COLOR_OK,
-  FUEL_COLOR_WARN,
-  FUEL_GAUGE_BG,
-  FUEL_GAUGE_HEIGHT_PX,
-  FUEL_GAUGE_WIDTH_PX,
-  MAX_CONTEXT_TOKENS,
+  CONTEXT_CRITICAL_THRESHOLD,
+  CONTEXT_DANGER_THRESHOLD,
+  CONTEXT_GAUGE_BG,
+  CONTEXT_GAUGE_COLOR_CRITICAL,
+  CONTEXT_GAUGE_COLOR_DANGER,
+  CONTEXT_GAUGE_COLOR_OK,
+  CONTEXT_GAUGE_COLOR_WARN,
+  CONTEXT_GAUGE_HEIGHT_PX,
+  CONTEXT_GAUGE_WIDTH_PX,
+  CONTEXT_WARN_THRESHOLD,
   TEAM_LEAD_COLOR,
   TEAM_ROLE_COLOR,
-  TOKEN_CRITICAL_THRESHOLD,
-  TOKEN_DANGER_THRESHOLD,
-  TOKEN_WARN_THRESHOLD,
   TOOL_OVERLAY_VERTICAL_OFFSET,
 } from '../../constants.js';
 import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js';
 import type { OfficeState } from '../engine/officeState.js';
+import { overlayProjection } from '../projection.js';
 import type { ToolActivity } from '../types.js';
-import { CharacterState, TILE_SIZE } from '../types.js';
+import { CharacterState } from '../types.js';
 
 // Both turn-end states show the green checkmark bubble. A finished turn (Stop)
 // shows ONLY the checkmark (the label falls through to its normal idle text);
@@ -54,6 +54,7 @@ interface ToolOverlayProps {
   officeState: OfficeState;
   agents: number[];
   agentTools: Record<number, ToolActivity[]>;
+  subagentTools: Record<number, Record<string, ToolActivity[]>>;
   subagentCharacters: SubagentCharacter[];
   containerRef: React.RefObject<HTMLDivElement | null>;
   zoom: number;
@@ -95,16 +96,17 @@ function getActivityText(
 }
 
 function getFuelColor(ratio: number): string {
-  if (ratio >= TOKEN_CRITICAL_THRESHOLD) return FUEL_COLOR_CRITICAL;
-  if (ratio >= TOKEN_DANGER_THRESHOLD) return FUEL_COLOR_DANGER;
-  if (ratio >= TOKEN_WARN_THRESHOLD) return FUEL_COLOR_WARN;
-  return FUEL_COLOR_OK;
+  if (ratio >= CONTEXT_CRITICAL_THRESHOLD) return CONTEXT_GAUGE_COLOR_CRITICAL;
+  if (ratio >= CONTEXT_DANGER_THRESHOLD) return CONTEXT_GAUGE_COLOR_DANGER;
+  if (ratio >= CONTEXT_WARN_THRESHOLD) return CONTEXT_GAUGE_COLOR_WARN;
+  return CONTEXT_GAUGE_COLOR_OK;
 }
 
 export function ToolOverlay({
   officeState,
   agents,
   agentTools,
+  subagentTools,
   subagentCharacters,
   containerRef,
   zoom,
@@ -125,15 +127,13 @@ export function ToolOverlay({
 
   const el = containerRef.current;
   if (!el) return null;
-  const rect = el.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const canvasW = Math.round(rect.width * dpr);
-  const canvasH = Math.round(rect.height * dpr);
-  const layout = officeState.getLayout();
-  const mapW = layout.cols * TILE_SIZE * zoom;
-  const mapH = layout.rows * TILE_SIZE * zoom;
-  const deviceOffsetX = Math.floor((canvasW - mapW) / 2) + Math.round(panRef.current.x);
-  const deviceOffsetY = Math.floor((canvasH - mapH) / 2) + Math.round(panRef.current.y);
+  const project = overlayProjection(
+    officeState.getLayout(),
+    el.getBoundingClientRect(),
+    zoom,
+    panRef.current,
+    window.devicePixelRatio || 1,
+  );
 
   const selectedId = officeState.selectedAgentId;
   const hoveredId = officeState.hoveredAgentId;
@@ -156,9 +156,8 @@ export function ToolOverlay({
 
         // Position above character
         const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;
-        const screenX = (deviceOffsetX + ch.x * zoom) / dpr;
-        const screenY =
-          (deviceOffsetY + (ch.y + sittingOffset - TOOL_OVERLAY_VERTICAL_OFFSET) * zoom) / dpr;
+        const screenX = project.toScreenX(ch.x);
+        const screenY = project.toScreenY(ch.y + sittingOffset - TOOL_OVERLAY_VERTICAL_OFFSET);
 
         // A "Done" agent (finished turn: waiting bubble without awaitingInput)
         // shows ONLY its floating green checkmark bubble, never the label panel
@@ -191,8 +190,13 @@ export function ToolOverlay({
           if (subHasPermission) {
             activityText = 'Needs approval';
           } else {
+            // Hover shows the subtask title; SELECTING the sub reveals its live
+            // tool activity (watched sub-agents stream it via subagentToolStart).
             const sub = subagentCharacters.find((s) => s.id === id);
-            activityText = sub ? sub.label : 'Subtask';
+            const rows = sub ? subagentTools[sub.parentAgentId]?.[sub.parentToolId] : undefined;
+            const activeRow =
+              isSelected && rows ? [...rows].reverse().find((t) => !t.done) : undefined;
+            activityText = activeRow?.status ?? (sub?.label || 'Subtask');
           }
         } else {
           activityText = getActivityText(
@@ -219,12 +223,15 @@ export function ToolOverlay({
         }
 
         // Team info
-        const isTeamAgent = !!ch.teamName;
         const teamRoleLabel = ch.isTeamLead ? 'LEAD' : ch.agentName || null;
-        const totalTokens = ch.inputTokens + ch.outputTokens;
-        const tokenRatio = totalTokens / MAX_CONTEXT_TOKENS;
         const secondaryLabel = getSecondaryLabel(ch.sessionTitle, ch.folderName, ch.surface);
         const hasExtraLines = !!(secondaryLabel || teamRoleLabel);
+
+        // Context gauge. Every agent gets one — lead, teammate, adopted,
+        // headless — as soon as it has taken a turn. Sub-agents never do: they
+        // have no session of their own, so contextTokens stays 0.
+        const contextRatio = ch.contextTokens / ch.maxContextTokens;
+        const showContextGauge = !isSub && ch.contextTokens > 0;
 
         return (
           <div
@@ -294,21 +301,23 @@ export function ToolOverlay({
                 </Button>
               )}
             </div>
-            {isTeamAgent && totalTokens > 0 && (
+            {showContextGauge && (
               <div
                 style={{
-                  width: FUEL_GAUGE_WIDTH_PX,
-                  height: FUEL_GAUGE_HEIGHT_PX,
-                  background: FUEL_GAUGE_BG,
+                  width: CONTEXT_GAUGE_WIDTH_PX,
+                  height: CONTEXT_GAUGE_HEIGHT_PX,
+                  background: CONTEXT_GAUGE_BG,
                   marginTop: 2,
                 }}
-                title={`${Math.round(tokenRatio * 100)}% context used (${(totalTokens / 1000).toFixed(0)}k tokens)`}
+                title={`${Math.round(contextRatio * 100)}% context used (${(ch.contextTokens / 1000).toFixed(0)}k of ${(ch.maxContextTokens / 1000).toFixed(0)}k tokens)`}
+                data-testid="context-gauge"
+                data-context-pct={Math.round(contextRatio * 100)}
               >
                 <div
                   style={{
-                    width: `${Math.min(tokenRatio * 100, 100)}%`,
+                    width: `${Math.min(contextRatio * 100, 100)}%`,
                     height: '100%',
-                    background: getFuelColor(tokenRatio),
+                    background: getFuelColor(contextRatio),
                   }}
                 />
               </div>
