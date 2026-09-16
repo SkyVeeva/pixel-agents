@@ -164,6 +164,28 @@ export function useExtensionMessages(
       setAgentFolderNames((prev) => (prev.includes(name) ? prev : [...prev, name]));
     };
 
+    // Materialize a restored/existing agent into OfficeState. Used both by the
+    // layoutLoaded flush (agents buffered because they arrived before the layout)
+    // and directly by the existingAgents handler when the layout is already loaded.
+    // The standalone server sends layoutLoaded *before* existingAgents (see
+    // clientMessageHandler send order), so buffering-until-layoutLoaded alone would
+    // drop every restored session — the flush has already run by the time they arrive.
+    const materializeAgent = (p: {
+      id: number;
+      palette?: number;
+      hueShift?: number;
+      seatId?: string;
+      folderName?: string;
+      sessionTitle?: string;
+      surface?: string;
+    }) => {
+      const os = getOfficeState();
+      os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
+      if (p.sessionTitle !== undefined || p.surface !== undefined) {
+        os.setSessionInfo(p.id, p.sessionTitle, p.surface);
+      }
+    };
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const handler = (msg: any) => {
       const os = getOfficeState();
@@ -213,10 +235,7 @@ export function useExtensionMessages(
         }
         // Add buffered agents now that layout (and seats) are correct
         for (const p of pendingAgents) {
-          os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
-          if (p.sessionTitle !== undefined || p.surface !== undefined) {
-            os.setSessionInfo(p.id, p.sessionTitle, p.surface);
-          }
+          materializeAgent(p);
         }
         pendingAgents = [];
         // Flush any session-info updates that raced ahead of character creation
@@ -312,10 +331,13 @@ export function useExtensionMessages(
         const folderNames = (msg.folderNames || {}) as Record<number, string>;
         const sessionTitles = (msg.sessionTitles || {}) as Record<number, string>;
         const surfaces = (msg.surfaces || {}) as Record<number, string>;
-        // Buffer agents — they'll be added in layoutLoaded after seats are built
+        // Materialize immediately when the layout is already loaded (the standalone
+        // WebSocket path sends layoutLoaded before existingAgents); otherwise buffer
+        // and let the layoutLoaded flush add them once seats exist (the VS Code
+        // postMessage path can deliver existingAgents first).
         for (const id of incoming) {
           const m = meta[id];
-          pendingAgents.push({
+          const p = {
             id,
             palette: m?.palette,
             hueShift: m?.hueShift,
@@ -323,7 +345,12 @@ export function useExtensionMessages(
             folderName: folderNames[id],
             sessionTitle: sessionTitles[id],
             surface: surfaces[id],
-          });
+          };
+          if (layoutReadyRef.current) {
+            materializeAgent(p);
+          } else {
+            pendingAgents.push(p);
+          }
           noteFolderName(folderNames[id]);
         }
         setAgents((prev) => {
