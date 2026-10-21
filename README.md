@@ -91,7 +91,7 @@ cd /path/to/your/project
 npx pixel-agents
 ```
 
-The CLI chooses a free local port and prints the URL. Standalone does not launch Claude for you; start Claude Code in a terminal for the same workspace. To install the command globally instead:
+The CLI chooses a free local port, opens the office in your default browser, and prints the URL. Running it again while an instance is up reuses that instance and just reopens the browser. Standalone does not launch Claude for you; start Claude Code in a terminal for the same workspace. To install the command globally instead:
 
 ```bash
 npm install --global pixel-agents
@@ -103,8 +103,12 @@ Use a fixed address or port when needed:
 ```bash
 pixel-agents --port 3100
 pixel-agents --host 127.0.0.1 --port 3100
+pixel-agents --no-open     # print the URL only (headless, SSH, CI)
+pixel-agents --no-hooks    # skip the hook install this run (file-watch mode)
 pixel-agents --help
 ```
+
+A `--port` different from the running instance's starts a second server instead of reusing it.
 
 The default bind address is `127.0.0.1`. Binding to `0.0.0.0` exposes the UI and WebSocket to the local network; do this only on a trusted network.
 

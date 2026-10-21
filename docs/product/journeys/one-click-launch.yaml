@@ -1,0 +1,52 @@
+# Journey SSOT — bootstrapped by DISCUSS (one-click-viewer-launch, 2026-07-17)
+id: one-click-launch
+name: One-click viewer launch
+persona: dev-dana
+jobs: [launch-viewer-effortlessly, reopen-without-duplicates]
+research_depth: lightweight
+
+happy_path:
+  - step: run
+    action: "Dana runs `npx pixel-agents` with no flags."
+    output: "A friendly startup line; work begins."
+    emotion: curiosity
+  - step: detect-existing
+    action: "Command checks ~/.pixel-agents/server.json for a live instance (PID alive)."
+    output: "If found → skip to open, targeting the existing URL."
+    emotion: (invisible; safety)
+  - step: start
+    action: "If none: pick a port, load assets, start the server, ensure Claude hooks (already default-on today)."
+    output: "Server listening; hooks confirmed installed."
+    emotion: mild-anxiety ("is it setting things up ok?")
+  - step: open
+    action: "Auto-open the default browser to the viewer URL."
+    output: "The pixel office appears in the browser."
+    emotion: relief
+  - step: see-activity
+    action: "Dana keeps working in Claude Code; agents appear/animate in the office."
+    output: "Characters move as agents act."
+    emotion: delight
+
+emotional_arc: curiosity -> mild-anxiety -> relief -> delight   # upward trajectory
+
+shared_artifacts:
+  - name: server.json
+    source: "server/src/server.ts (writes ~/.pixel-agents/server.json {port,pid,authToken})"
+    consumers: [detect-existing step, open step]
+  - name: viewer_url
+    source: "derived from the bound host+port after server.start()"
+    consumers: [open step, headless-fallback]
+
+error_paths:
+  - at: open
+    failure: "No browser available (SSH / headless / CI)."
+    recovery: "Print the URL prominently and keep serving. `--no-open` suppresses auto-open by design."
+  - at: detect-existing
+    failure: "server.json points to a dead PID."
+    recovery: "Treat as no instance; start fresh (existing PID-liveness logic)."
+  - at: start
+    failure: "Hook install fails (permissions / malformed settings)."
+    recovery: "Log it, print manual-install hint, keep serving — viewer still works via JSONL heuristic mode."
+  - at: open
+    failure: "Chosen/opened URL is wrong because bind host is 0.0.0.0."
+    recovery: "Open a loopback URL (127.0.0.1) for the browser even when bound to a wildcard host."

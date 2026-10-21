@@ -173,11 +173,15 @@ describe('dist/cli.js entry-point guard', () => {
   ): Promise<void> {
     const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cli-workspace-'));
     const port = await getFreePort();
-    const child = spawn(process.execPath, [CLI_BUNDLE, '--port', port.toString(), '--host', host], {
-      cwd: workspaceDir,
-      env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = spawn(
+      process.execPath,
+      [CLI_BUNDLE, '--port', port.toString(), '--host', host, '--no-open'],
+      {
+        cwd: workspaceDir,
+        env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
     let output = '';
     child.stdout.on('data', (chunk: Buffer) => (output += chunk.toString()));
     child.stderr.on('data', (chunk: Buffer) => (output += chunk.toString()));
@@ -386,7 +390,7 @@ describe('dist/cli.js entry-point guard', () => {
     const port = await getFreePort();
     const child = spawn(
       process.execPath,
-      [CLI_BUNDLE, '--port', port.toString(), '--host', '127.0.0.1'],
+      [CLI_BUNDLE, '--port', port.toString(), '--host', '127.0.0.1', '--no-open'],
       {
         cwd: workspaceDir,
         env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome },

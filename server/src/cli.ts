@@ -12,6 +12,7 @@ import * as path from 'path';
 
 import { AgentRuntime } from './agentRuntime.js';
 import { AgentStateStore } from './agentStateStore.js';
+import { defaultSpawn, openUri } from './appFocus.js';
 import {
   buildAssetCache,
   loadAllCharacters,
@@ -27,6 +28,7 @@ import {
 } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
+import { describeLiveActivity, parseLaunchFlags, planLaunch } from './launchViewer.js';
 import { claudeProvider, copyHookScript, hookProviderById } from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
 
@@ -71,7 +73,12 @@ export function parseArgs(argv: string[]): CliArgs {
 Options:
   --port, -p <number>   Port to listen on (default: OS-assigned ephemeral port)
   --host <string>       Host to bind to (default: 127.0.0.1)
-  --help                Show this help message`);
+  --no-open             Don't open the browser; just print the viewer URL
+  --no-hooks            Don't install Claude hooks this run (file-watch mode)
+  --help                Show this help message
+
+Running pixel-agents again reuses an instance that is already running
+(unless --port names a different port) and opens the browser to it.`);
       process.exit(0);
     }
   }
@@ -101,10 +108,19 @@ function copyHookScriptOrReport(packageRoot: string, context = ''): boolean {
   return false;
 }
 
+/** Open the viewer in the default browser. Best-effort: openUri never throws
+ *  and a missing opener is swallowed, so a headless box keeps serving.
+ *  PIXEL_AGENTS_OPEN_CMD replaces the OS opener (tests, custom browsers). */
+function openViewer(url: string): void {
+  const override = process.env['PIXEL_AGENTS_OPEN_CMD'];
+  openUri(url, override ? { spawn: () => defaultSpawn(override, [url]) } : {});
+}
+
 // ── Main ──────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   let args: CliArgs;
+  const flags = parseLaunchFlags(process.argv.slice(2));
   try {
     args = parseArgs(process.argv.slice(2));
   } catch (err) {
@@ -240,10 +256,27 @@ async function main(): Promise<void> {
     });
     currentConfig = { port: config.port, token: config.token };
 
+    const plan = planLaunch({
+      port: config.port,
+      configPid: config.pid,
+      selfPid: process.pid,
+      open: flags.open,
+      token: config.token,
+    });
+    if (plan.exitAfter) {
+      // start() handed back another process's live server. That process owns
+      // the scanners and hooks; this one only points the browser at it.
+      console.log(`\n  ${plan.lines.join('\n  ')}\n`);
+      if (plan.shouldOpen) openViewer(plan.url);
+      runtime.dispose();
+      process.exit(0);
+    }
+
     // Sync runtime refs with persisted settings BEFORE first scan tick. The
     // runtime's single hooksEnabled ref follows the Claude provider until the
     // scanners grow per-provider awareness alongside the Settings UI.
-    runtime.hooksEnabled.current = getHooksEnabled(claudeProvider.id);
+    // --no-hooks is a per-run override, never persisted.
+    runtime.hooksEnabled.current = flags.hooks && getHooksEnabled(claudeProvider.id);
     runtime.watchAllSessions.current = adapter.getSetting('pixel-agents.watchAllSessions', false);
     runtime.watchCoworkSessions.current = adapter.getSetting(
       'pixel-agents.watchCoworkSessions',
@@ -252,6 +285,11 @@ async function main(): Promise<void> {
 
     // Install hooks on startup if the persisted setting says so — gated on the
     // one-time consent to modify ~/.claude/settings.json.
+    const hooksOutcome = {
+      requested: runtime.hooksEnabled.current,
+      installed: false,
+      awaitingConsent: false,
+    };
     if (runtime.hooksEnabled.current) {
       let consent = getHooksConsent(claudeProvider.id) === 'granted';
       if (!consent && (await claudeProvider.areHooksInstalled())) {
@@ -267,24 +305,23 @@ async function main(): Promise<void> {
         consent = true;
       }
       if (!consent) {
+        hooksOutcome.awaitingConsent = true;
         console.log(
           '[Pixel Agents] Hooks not installed: modifying ~/.claude/settings.json needs one-time approval — open the URL below to review and approve it.',
         );
       } else if (copyHookScriptOrReport(packageRoot)) {
         try {
           await claudeProvider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
+          hooksOutcome.installed = true;
           console.log('[Pixel Agents] Hooks installed');
         } catch (err) {
           console.error(`[Pixel Agents] ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-    } else {
-      // Without this line, a persisted hooks-off makes startup skip the entire
-      // consent/install flow with zero output — indistinguishable from a bug.
-      console.log(
-        '[Pixel Agents] Hooks disabled — enable "Instant Detection (Hooks)" in the UI settings to install them.',
-      );
     }
+    // Always report the outcome: without it, a persisted hooks-off makes startup
+    // skip the entire consent/install flow with zero output — indistinguishable
+    // from a bug.
 
     // Start scanning for external sessions (Claude running in user's terminal)
     const cwd = process.cwd();
@@ -312,8 +349,12 @@ async function main(): Promise<void> {
     const displayHost =
       args.host === '0.0.0.0' || args.host === '::' || args.host === '' ? '127.0.0.1' : args.host;
     console.log(
-      `\n  Pixel Agents server running at http://${displayHost}:${config.port}/?token=${config.token}\n`,
+      `\n  Pixel Agents server running at http://${displayHost}:${config.port}/?token=${config.token}`,
     );
+    // The opened URL is always loopback (ADR-0003 DD4), whatever the bind host.
+    console.log(`  ${describeLiveActivity(hooksOutcome)}`);
+    console.log(`  ${plan.lines.join('\n  ')}\n`);
+    if (plan.shouldOpen) openViewer(plan.url);
 
     // ── Graceful shutdown ──
     function shutdown(): void {

@@ -58,6 +58,7 @@ export class PixelAgentsServer {
   /**
    * Start the server. If a compatible instance is already running (detected via
    * the multi-server registry), reuses its config without starting a new one.
+   * An explicit `port` only reuses a live server already on that port.
    */
   async start(options?: {
     store?: AgentStateStore;
@@ -80,7 +81,11 @@ export class PixelAgentsServer {
     // server (blank page). Prune dead entries first so a crashed server's
     // stale file never blocks discovery of a live one.
     const registry = this.readAndPruneRegistry();
-    const candidate = registry.find((e) => e.servesSpa === wantsSpa);
+    // An explicit port is the caller's intent to serve THERE: a live server
+    // on some other port is not a substitute for it.
+    const candidate = registry.find(
+      (e) => e.servesSpa === wantsSpa && (options?.port === undefined || e.port === options.port),
+    );
     if (candidate) {
       this.config = candidate;
       this.ownsServer = false;

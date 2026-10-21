@@ -48,6 +48,7 @@ server/                              Lifecycle runtime + Fastify HTTP/WS server
     appFocus.ts                      Generic per-OS launcher (open/start/xdg-open), injectable spawn
     server.ts                        Top-level composition
     cli.ts                           npx pixel-agents entry (npm bin)
+    launchViewer.ts                  Pure one-click launch decisions: --no-open/--no-hooks, loopback+token URL, reuse-and-exit plan, live-activity line
     fileStateAdapter.ts              Namespaced ~/.pixel-agents/ persistence
     configPersistence.ts             { vscode, standalone, externalAssetDirectories, hooksConsent: {providerId: granted|declined}, hooksEnabled: {providerId: boolean} }
     layoutPersistence.ts             ~/.pixel-agents/layout.json with atomic tmp+rename

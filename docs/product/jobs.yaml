@@ -1,0 +1,61 @@
+# Jobs SSOT — bootstrapped by DISCUSS (one-click-viewer-launch, 2026-07-17)
+# Every user-facing story must reference one of these job_ids.
+
+jobs:
+  - id: launch-viewer-effortlessly
+    persona: dev-dana
+    primary: true
+    job_story: >-
+      When I'm working in Claude Code and want to see my agents come alive,
+      I want to launch the pixel-agents viewer with a single command and have it
+      just work, so I can watch agent activity without fiddling with ports,
+      hooks, or URLs.
+    dimensions:
+      functional: >-
+        Get a running viewer, in the browser, already connected to live Claude
+        activity, from one command with no flags and no manual follow-up steps.
+      emotional: >-
+        Feel that "it just works" — relief and a little delight, not the dread of
+        setup and copy-paste.
+      social: >-
+        Looks polished and effortless when demoing or screen-sharing to others.
+    four_forces:
+      push: >-
+        Today `npx pixel-agents` starts on an ephemeral port and only PRINTS the
+        URL — the user must find it in stdout and open it manually. Re-running
+        spins up a second server. It's not "one click".
+      pull: >-
+        A single command that opens a working, live office window automatically.
+      anxiety: >-
+        "Will it modify my ~/.claude settings? Will it conflict with a viewer
+        I already have open? Which port?"
+      habit: >-
+        Currently: run npx, squint at stdout, copy-paste the URL — or just fall
+        back to the VS Code extension.
+    opportunity_score:
+      importance: 9      # core to the product's "ambient glance" promise
+      satisfaction: 3    # works, but every launch has copy-paste friction
+      gap: 6             # importance - satisfaction; high opportunity
+    feeds_stories: [US-1, US-2, US-4]
+
+  - id: reopen-without-duplicates
+    persona: dev-dana
+    primary: false
+    job_story: >-
+      When I want the viewer but I may already have one running, I want the
+      launch command to just bring up the existing office, so I don't end up with
+      duplicate servers and stale tabs.
+    dimensions:
+      functional: Reuse a live instance instead of starting a second one.
+      emotional: Confidence that re-running is safe and idempotent.
+      social: n/a
+    four_forces:
+      push: The CLI always starts a new server; server.json discovery exists but the launch path doesn't reuse it.
+      pull: Re-running "just opens what's already there".
+      anxiety: "Am I leaking background servers every time I run this?"
+      habit: Manually finding and killing extra servers, or ignoring the mess.
+    opportunity_score:
+      importance: 6
+      satisfaction: 3
+      gap: 3
+    feeds_stories: [US-3]

@@ -49,15 +49,19 @@ npm run build      # asyncapi codegen → typecheck → lint → bundle CLI + we
 node dist/cli.js --port 3100
 ```
 
-Then open **http://127.0.0.1:3100** in a browser.
+Your default browser opens the office (pass `--no-open` to just print the URL).
+Running the command again while it's up reuses that server instead of starting
+a second one.
 
 - `--port` is optional; without it the server picks a random free port (handy for
   running several at once). Pin `3100` so the URL is predictable.
 - The chosen port + PID are written to `~/.pixel-agents/server.json`.
-- On startup the server **auto-installs the Claude Code hook** into
-  `~/.claude/settings.json` (unless you turn hooks off in Settings). This is what
-  gives instant, reliable status for terminal + desktop sessions. It's atomic and
-  preserves any hooks you already have.
+- The first time, the office asks for your OK before installing the Claude Code
+  hook into `~/.claude/settings.json`; after that it is re-ensured on every start
+  (unless you turn hooks off in Settings, or pass `--no-hooks` for one run). This
+  is what gives instant, reliable status for terminal + desktop sessions. It's
+  atomic and preserves any hooks you already have. The startup output has a
+  `Live Claude activity:` line saying which mode you're in.
 
 You should see an empty office. Now let's populate it.
 

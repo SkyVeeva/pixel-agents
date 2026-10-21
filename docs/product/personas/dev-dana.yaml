@@ -1,0 +1,32 @@
+# Persona SSOT — bootstrapped by DISCUSS (one-click-viewer-launch, 2026-07-17)
+id: dev-dana
+name: "Dev Dana"
+pronouns: they/them
+one_liner: >-
+  A developer already working in Claude Code who wants an ambient glance at the
+  pixel office without breaking flow or fiddling with setup.
+primary: true
+
+goals:
+  - See live agent activity at a glance while coding.
+  - Zero setup ceremony — no ports, no URLs to copy, no hook concepts.
+  - Trust that launching won't clutter their machine or spawn duplicates.
+
+frustrations:
+  - "I ran the command and now I have to hunt for the URL in the terminal."
+  - "The port changes every time, so I can't bookmark it."
+  - "Did it even connect to Claude? Nothing is moving."
+  - "I ran it twice and now there are two servers."
+
+mental_model:
+  - "One command should open a window showing my agents. Done."
+  - Thinks in terms of "the viewer", not "a Fastify server on a port".
+  - Does not want to learn what a hook is to use the viewer.
+
+vocabulary:
+  - "the viewer" / "the office" (not "the SPA" or "the server")
+  - "launch" / "open" (not "start the standalone runtime")
+
+context:
+  - Already uses Claude Code (terminal and/or VS Code).
+  - Comfortable running an `npx` command; not interested in flags.

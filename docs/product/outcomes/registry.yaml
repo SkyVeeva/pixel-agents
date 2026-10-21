@@ -1,0 +1,21 @@
+schema_version: "0.1"
+outcomes:
+  - id: OUT-1
+    kind: operation
+    summary: One-click launch of the pixel-agents browser viewer, connected to live Claude activity
+    feature: one-click-viewer-launch
+    inputs:
+      - shape: "argv: string[]  # `npx pixel-agents [--no-open] [--no-hooks] [--port N]`"
+    output:
+      shape: "viewer opened in default browser (or reused instance opened); stdout status lines; exit code 0"
+    keywords:
+      - one-click
+      - launch
+      - browser
+      - open
+      - viewer
+      - cli
+      - reuse
+    artifact: server/src/launchViewer.ts
+    related: []
+    superseded_by: null

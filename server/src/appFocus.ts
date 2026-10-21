@@ -17,8 +17,11 @@ export interface AppFocusOptions {
   spawn?: SpawnLike;
 }
 
-function defaultSpawn(command: string, args: string[]): { unref?: () => void } {
+export function defaultSpawn(command: string, args: string[]): { unref?: () => void } {
   const child = nodeSpawn(command, args, { detached: true, stdio: 'ignore' });
+  // A missing opener (no xdg-open on a headless box) is reported as an async
+  // 'error' event, which crashes the host when nobody listens for it.
+  child.on('error', () => {});
   return child;
 }
 
